@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.6.5
+// @version      5.6.6
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply entering/entered.
@@ -1125,7 +1125,8 @@
     if (step === 'location') {
       const locSection = () => [...document.querySelectorAll('section.editable')].find(x => /Initial Appt/.test(x.innerText));
       const hasImg = () => { const sct = locSection(); return !!(sct && sct.querySelector('img')); };
-      for (let attempt = 1; attempt <= 2 && !hasImg(); attempt++) {
+      let seen = -1;                                     // how many photos the picker listed (for the error message)
+      for (let attempt = 1; attempt <= 3 && !hasImg(); attempt++) {
         try {
           const sct = await waitFor(locSection, 15000);
           const pencil = sct && sct.querySelector('span.edit');
@@ -1139,18 +1140,24 @@
           // The picker does NOT list photos newest-first, so pick by FILE NAME – never the lead sheet.
           // Each thumbnail's address ends in ".../<file name>/w_200,h_200/".
           // match the ENDING only – AccuLynx rewrites the name part of the file (odd characters are dropped)
+          const photosTab = [...document.querySelectorAll('a,button,li,div')]
+            .find(e => visible(e) && e.children.length < 3 && e.textContent.trim() === 'Photos');
+          if (photosTab) { photosTab.click(); await sleep(800); }      // make sure we are on the Photos tab
           const wanted = [/_house\.jpg/i, /_overview\.jpg/i];
           const thumb = await waitFor(() => {
             const items = [...document.querySelectorAll('li.attachment')];
+            seen = items.length;
+            if (items[0]) items[0].scrollIntoView({ block: 'center' });   // a hidden tab renders the list lazily
             for (const re of wanted) {
               const hit = items.find(li => { const im = li.querySelector('img'); return im && re.test(decodeURIComponent(im.src)); });
               if (hit) return hit.querySelector('button') || hit;
             }
             return null;
-          }, 12000);
-          if (!thumb) throw new Error('house/overview photo not listed in the picker');
+          }, 20000, 400);
+          if (!thumb) throw new Error('house/overview photo not in the picker (' + seen + ' photo(s) listed)');
           thumb.click(); await sleep(600);
           const save1 = [...document.querySelectorAll('button')].filter(x => visible(x) && x.innerText.trim() === 'Save').pop();
+          if (!save1) throw new Error('Save button not found in the photo picker');
           save1.click(); await sleep(2000);
           const save2 = [...document.querySelectorAll('button')].filter(x => visible(x) && x.innerText.trim() === 'Save').pop();
           if (save2) save2.click();
@@ -1163,7 +1170,7 @@
         }
       }
       if (hasImg()) log('House picture set on Location Info');
-      else { const pr = GM_getValue('amos_problems_' + lead.id, []) || []; pr.push('House picture NOT set on Location Info – do it by hand'); GM_setValue('amos_problems_' + lead.id, pr); }
+      else { const pr = GM_getValue('amos_problems_' + lead.id, []) || []; pr.push('House picture NOT set on Location Info (picker listed ' + seen + ' photo(s)) – do it by hand'); GM_setValue('amos_problems_' + lead.id, pr); }
       return go('/communications', 'comments');
     }
     if (step === 'comments') {
