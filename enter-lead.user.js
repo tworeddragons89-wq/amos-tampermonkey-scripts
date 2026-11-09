@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.6.8
+// @version      5.6.9
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply entering/entered.
@@ -183,7 +183,7 @@
   function parseDictatedLead(text, repName) {
     text = deGhost(text).replace(/\b(\d{1,3}),(\d{3})\b(?!,\d)/g, "$1$2");   // "3,000 Main Street" → 3000
     // drop any header line GroupMe may leave in ("JI", "James Isaac12:36 PM") before flattening
-    const flat = text.split(/\r?\n/).filter(l => l.trim() && !/^[A-Z]{1,3}$/.test(l.trim()) && !/(\d{1,2}:\d{2}\s*[AP]M|Just now|Yesterday)\s*$/i.test(l.trim()))
+    const flat = text.split(/\r?\n/).filter(l => l.trim() && !/^[A-Z]{1,3}$/.test(l.trim()) && !/^[a-z]{1,3}\d{1,2}$/i.test(l.trim()) && !/(\d{1,2}:\d{2}\s*[AP]M|Just now|Yesterday)\s*$/i.test(l.trim()))
                      .join(' ').replace(/\s+/g, ' ').trim();
     const phoneRe = /(\(?\d{3}\)?[\s.\-]{0,3}\d{3}[\s.\-]{0,3}\d{4})/;
     const phoneM = flat.match(phoneRe);
@@ -202,6 +202,8 @@
     namePart = namePart.replace(/(\S+)\s+([a-z](?: [a-z]){2,})\b/gi, (all, word, letters) => titleCase(letters.replace(/ /g, '')))
                        .replace(/\b[a-z](?: [a-z]){2,}\b/gi, '')                // any leftover spelled letters
                        .replace(/\s*(,|&|\+|\band\b)\s*/gi, ' and ').replace(/\s+/g, ' ').trim();
+    namePart = namePart.replace(/\s+(?:they|she|he|we)?\s*(?:live|lives|living|reside|resides)(?:\s+at)?$/i, '').replace(/\s+(?:address\s+is|located\s+at|at)$/i, '').trim();   // "… Warden they live at"
+    namePart = namePart.replace(/^(\S+)\s+(\S+)\s+and\s+(\S+)\s+\2$/i, '$1 and $3 $2');       // "Corey Warden and Amanda Warden" → "Corey and Amanda Warden"
     const parts = namePart.split(' ').filter(Boolean);
     lead.first = parts.length > 1 ? titleCase(parts.slice(0, -1).join(' ')) : (parts[0] ? titleCase(parts[0]) : CONFIG.defaults.first);
     lead.last = parts.length ? titleCase(parts[parts.length - 1]) : CONFIG.defaults.last;
