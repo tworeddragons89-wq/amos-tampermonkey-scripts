@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.6.7
+// @version      5.6.8
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply entering/entered.
@@ -806,6 +806,7 @@
     }
     return new Promise(r => cv.toBlob(r, 'image/jpeg', 0.9));
   }
+  const streetRe = (num, word) => new RegExp('\\b' + num + '\\s+(?:(?:north|south|east|west|[nsew])\\.?\\s+)?' + word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
   async function uploadPhotos(files, retry = 1) {
     if (files.some(f => !f.size || f.size < 2000)) throw new Error('the picture download came back empty');
     const upBtn = () => [...document.querySelectorAll('button')].find(b => visible(b) && b.textContent.trim() === 'Upload');
@@ -1059,13 +1060,15 @@
     for (const it of items) {
       if (!lead.phone || !it.replace(/\D/g, '').includes(lead.phone)) continue;
       const sameName = lastN.length > 2 && norm(it).includes(lastN);
-      const sameAddr = stNum && stWord && new RegExp('\\b' + stNum + '\\b[^\\n]{0,40}' + stWord, 'i').test(it);
+      const sameAddr = stNum && stWord && streetRe(stNum, stWord).test(it);
       if (sameName || sameAddr) return 'same phone number';
     }
     if (items.length) txt = items.join('\n');                       // address check below runs on the match items
     const num = (lead.address.match(/^\d+/) || [''])[0];
     const word = (lead.address.replace(/^\d+\s+/, '').split(/[\s,]+/).find(w => w.length > 2 && !/^(north|south|east|west)$/i.test(w)) || '');
-    if (num && word && new RegExp('\\b' + num + '\\s+[^\\n]*' + word, 'i').test(txt)) return 'same street address';
+    // the street word must come RIGHT AFTER the number (an optional N/S/E/W between) – "3000 State" once matched
+    // "3000 East 131st Street, Fishers, Indiana … UNITED STATES"
+    if (num && word && streetRe(num, word).test(txt)) return 'same street address';
     return '';
   }
   // RULE: when the original job's lead is over 1 year old, its Lead Source is replaced by the new one
@@ -1169,14 +1172,20 @@
             seen = items.length;
             if (items[0]) items[0].scrollIntoView({ block: 'center' });   // a hidden tab renders the list lazily
             for (const re of wanted) {
-              const hit = items.find(li => { const im = li.querySelector('img'); return im && re.test(decodeURIComponent(im.src)); });
+              // read the whole item, not just img.src – in a background tab the picture is not loaded yet and
+              // src is still a placeholder (the file name sits in data-src / the item's markup)
+              const hit = items.find(li => { try { return re.test(decodeURIComponent(li.outerHTML)); } catch (e) { return re.test(li.outerHTML); } });
               if (hit) return hit.querySelector('button') || hit;
             }
             return null;
           }, 20000, 400);
           if (!thumb) throw new Error('house/overview photo not in the picker (' + seen + ' photo(s) listed)');
           thumb.click(); await sleep(600);
-          const save1 = [...document.querySelectorAll('button')].filter(x => visible(x) && x.innerText.trim() === 'Save').pop();
+          // the PICKER's own Save – the Location editor's Save sits later on the page, and clicking that one
+          // closed everything without the picture (this was the long-running "House picture NOT set" failure)
+          let pick = document.querySelector('button.file-picker-tabs__tab');
+          while (pick && ![...pick.querySelectorAll('button')].some(b => visible(b) && b.innerText.trim() === 'Save')) pick = pick.parentElement;
+          const save1 = pick && [...pick.querySelectorAll('button')].filter(x => visible(x) && x.innerText.trim() === 'Save').pop();
           if (!save1) throw new Error('Save button not found in the photo picker');
           save1.click(); await sleep(2000);
           const save2 = [...document.querySelectorAll('button')].filter(x => visible(x) && x.innerText.trim() === 'Save').pop();
@@ -1207,7 +1216,9 @@
       }, 30000);
       if (!first) throw new Error('notes message not found in Communications');
       first.click(); await sleep(2500);
-      const threadText = () => document.body.innerText.replace(/\s+/g, ' ');
+      // read only the messages area – the page header shows "Name 123 Street City", which once matched the rep's
+      // post ("Name 123 Street City …") and the rep's post was skipped
+      const threadText = () => ((document.querySelector('article') || document.body).innerText).replace(/\s+/g, ' ');
       if (!threadText().includes(lead.raw.replace(/\s+/g, ' ').slice(0, 40)))
         await replyInThread(lead.raw);
       if (!threadText().includes((srcLine + ' Initial Appt: ' + lead.apptText).replace(/\s+/g, ' ')))
