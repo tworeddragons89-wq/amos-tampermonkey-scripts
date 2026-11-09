@@ -1,9 +1,7 @@
 // ==UserScript==
 // @name         Amos Insurance Updater (AccuLynx)
 // @namespace    amos-exteriors
-// @version      1.0.0
-// @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/insurance-updater.user.js
-// @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/insurance-updater.user.js
+// @version      1.3.0
 // @description  Fills blank Insurance and Adjuster fields on Inspection/Insurance leads from the carrier's scope, and lists everything it can't decide for a person to review.
 // @match        https://my.acculynx.com/*
 // @grant        GM_xmlhttpRequest
@@ -14,6 +12,8 @@
 // @connect      files.acculynx.com
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
+// @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/insurance-updater.user.js
+// @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/insurance-updater.user.js
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
@@ -232,6 +232,7 @@ const AIU_CORE = (env) => {
     ['ERIE', /\berie\s+(?:insurance|indemnity|family|exchange)/i], ['Liberty Mutual', /liberty\s+mutual/i], ['Travelers', /travelers\s+(?:insurance|casualty|home|indemnity|property|personal|commercial)|\bthe\s+travelers\b/i], ['FARMERS', /farmers\s+(?:insurance|group|exchange)/i],
     ['Assurant', /assurant|standard\s+guaranty|american\s+bankers/i], ['USAA', /\busaa\b/i], ['Nationwide', /nationwide\s+(?:insurance|mutual|property|general)/i], ['Progressive', /progressive\s+(?:insurance|casualty|home|direct|specialty|advanced)|asi\s+progressive/i], ['Geico', /geico/i],
     ['Auto-Owners', /auto[\s-]?owners/i], ['Cincinnati', /cincinnati\s+(?:insurance|financial)/i], ['Grange', /grange\s+(?:insurance|mutual)/i], ['Safeco', /safeco/i], ['Westfield', /westfield\s+(?:insurance|group)/i],
+    ['Encova', /\bencova\b/i],
     ['Meridian', /meridian\s+security/i], ['Encompass', /encompass\s+(?:insurance|indemnity)/i], ['Homesite', /homesite/i], ['Pekin', /pekin\s+(?:insurance|life)/i], ['Hanover', /\bhanover\s+(?:insurance|fire)/i],
     ['Shelter', /shelter\s+(?:insurance|mutual)/i], ['Country Financial', /country\s+financial/i], ['Chubb', /\bchubb\b/i], ['Foremost', /foremost\s+(?:insurance|signature|property)/i], ['American Strategic', /american\s+strategic/i],
     ['Universal Property', /universal\s+property/i], ['Kemper', /\bkemper\b/i], ['MetLife', /met\s?life/i], ['The Hartford', /the\s+hartford|hartford\s+(?:fire|insurance)/i], ['American National', /american\s+national/i],
@@ -254,7 +255,16 @@ const AIU_CORE = (env) => {
   const titleCase = (s) => (/[a-z]/.test(s) ? s : s.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase()));
   const CONSUMER = /@(gmail|yahoo|hotmail|aol|outlook|icloud|live|msn|comcast|att|sbcglobal|bellsouth|ymail|me|protonmail)\./i;
   const emails = (s) => [...String(s).matchAll(/(?:^|[\s:;,<(])([A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.[A-Z]{2,})(?=$|[\s>),;])/gi)].map((x) => x[1].toLowerCase()).filter((x) => !/amos/i.test(x) && !CONSUMER.test(x));
-  const PHONE = '(?<![\\d-])(?:1[\\s.-]?)?\\(?[2-9]\\d{2}\\)?[\\s.-]*[2-9]\\d{2}[\\s.-]*\\d{4}(?![\\d-])';
+  // v1.1.0: a phone number must have separators ("(317) 555-1212", "866-787-8676"); a bare 10-digit run is usually a policy or claim number
+  const PHONE = '(?<![\\d-])(?:1[\\s.-]?)?(?:\\([2-9]\\d{2}\\)\\s*|[2-9]\\d{2}[\\s.-])[2-9]\\d{2}[\\s.-]\\d{4}(?![\\d-])';
+  // v1.1.0: a person's name from a "Claim Rep.: Paul Gund FL#W833204 Billing: ..." style header
+  const NAME_STOP = /^(?:business|phone|cell|cellular|home|e-?mail|company|office|license|licence|position|billing|fax|claim|estimate|insured|property|adjuster|estimator|date|policy|type|contact)$/i;
+  const TEAMISH = /\b(?:team|department|dept|claims?|estimating|estimate|center|centre|services?|insurance|group|unit|desk|office|line|catastrophe|processing)\b/i;
+  function cleanName(raw) {
+    const toks = String(raw).replace(/#.*$/, '').split(/[ ,]+/).filter(Boolean); const keep = [];
+    for (const t of toks) { if (NAME_STOP.test(t)) break; if (keep.length >= 2 && /^[A-Z]{2}$/.test(t)) break; keep.push(t); }
+    return keep.join(' ').trim();
+  }
   function parseScope(text) {
     const t = String(text || ''); const lines = t.split('\n').map((l) => l.trim());
     const r = { readable: t.replace(/\s/g, '').length >= 300, flags: [] };
@@ -262,15 +272,18 @@ const AIU_CORE = (env) => {
     m = t.match(/Date\s+of\s+Loss\s*:?\s*(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})/i) || t.match(/Loss\s+Date\s*:?\s*(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})/i);
     if (m) { let y = +m[3]; if (y < 100) y += 2000; r.dol = { y, m: +m[1], d: +m[2] }; }
     m = t.match(/Type\s+of\s+Loss\s*:?\s*([A-Za-z][A-Za-z\/& -]{1,30}?)(?:\s{2,}|\n|$|\s+(?:Deductible|Date|Policy|Claim))/i); if (m) r.lossType = m[1].trim();
-    // adjuster: labelled form (Xactimate header)
-    m = t.match(/(?:^|\n)\s*(?:Estimator|Adjuster|Claim\s*Rep(?:\.|resentative)?|Claims?\s+Professional|Field\s+Adjuster|Desk\s+Adjuster|Independent\s+Adjuster)\s*:\s*([A-Z][A-Za-z.'-]+(?:[ ,]+[A-Z][A-Za-z.'-]*){1,3})/);
-    if (m) {
-      r.adjName = titleCase(m[1].replace(/\s+(Business|Phone|Cell|E-?mail|Company|Office).*$/i, '').trim());
-      const near = t.slice(m.index, m.index + 400);
+    // adjuster: labelled form (Xactimate header). v1.1.0: try every label, skip team names, strip license numbers.
+    const labelRe = /(?:^|\n)\s*(?:Estimator|Adjuster|Claim\s*Rep(?:\.|resentative)?|Claims?\s+Professional|Field\s+Adjuster|Desk\s+Adjuster|Independent\s+Adjuster)\s*:\s*([A-Z][A-Za-z.'#0-9-]+(?:[ ,]+[A-Z][A-Za-z.'#0-9-]*){1,3})/g;
+    for (const lm of t.matchAll(labelRe)) {
+      const nm = cleanName(lm[1]);
+      if (nm.split(' ').length < 2 || TEAMISH.test(nm)) continue;
+      r.adjName = titleCase(nm);
+      let near = t.slice(lm.index, lm.index + 400); const stopAt = near.slice(5).search(/\b(?:Claim\s*(?:Number|No)|Policy\s*Number|Type\s*of\s*Loss|Date\s+of)\b/i); if (stopAt >= 0) near = near.slice(0, stopAt + 5);
       const p = near.match(new RegExp('(' + PHONE + ')(?:\\s*(?:x|ext\\.?|extension)\\s*(\\d{1,8})(?!\\d))?', 'i')); if (p) { r.adjPhone = fmtPhone(p[1]); if (p[2]) r.adjExt = p[2]; }
       const e = emails(near)[0]; if (e) r.adjEmail = e;
+      break;
     }
-    // adjuster: State Farm form ("Last, First" then "800-555-0100 x 1234")
+    // adjuster: State Farm form ("Last, First" then "866-787-8676 x 9785")
     if (!r.adjName) for (let i = 0; i < lines.length - 1; i++) {
       const a = lines[i].match(/^([A-Z][A-Za-z'-]+),\s*([A-Z][A-Za-z'-]+(?:\s+[A-Z]\.?)?)$/); const b = lines[i + 1].match(new RegExp('^(' + PHONE + ')(?:\\s*(?:x|ext\\.?)\\s*(\\d{1,8}))?$', 'i'));
       if (a && b && !/^(INDIANAPOLIS|MARION|IN)$/i.test(a[1])) { r.adjName = titleCase(a[2] + ' ' + a[1]); r.adjPhone = fmtPhone(b[1]); if (b[2]) r.adjExt = b[2]; break; }
@@ -300,7 +313,7 @@ const AIU_CORE = (env) => {
     const f = { notes: [] };
     if (/\b(?:claim\s+(?:was\s+|got\s+|has\s+been\s+)?denied|denied\s+(?:the\s+)?(?:claim|roof|by\s+(?:the\s+)?insurance)|insurance\s+denied|denial\s+letter|claim\s+denial)\b/i.test(all)) { f.denied = true; f.notes.push('messages mention a denied claim'); }
     if (/full(?:y)?\s+approv/i.test(all)) { f.fullApproval = true; f.notes.push('messages mention a full approval (check Claim Approved)'); }
-    if (/\bmet\s+(?:with\s+)?(?:the\s+)?adjuster|adjuster\s+(?:meeting|appointment)\s+(?:went|was|is\s+done)/i.test(all)) { f.metAdjuster = true; f.notes.push('messages mention meeting the adjuster (check Met Adjuster)'); }
+    if (/\bmet\s+(?:with\s+)?(?:the\s+)?adjuster|adjuster\s+(?:meeting|appointment)\s+(?:went|was|is\s+done)|had\s+(?:an?\s+)?adjuster\s+meeting/i.test(all)) { f.metAdjuster = true; f.notes.push('messages mention meeting the adjuster (check Met Adjuster)'); }
     if (/\bpartial(?:ly)?\s+(?:approv|pay)|approved\s+(?:only\s+)?(?:the\s+)?(?:gutters|siding|windows|front|back)/i.test(all)) f.notes.push('messages mention a partial approval');
     if (/\bretail\b/i.test(all)) f.retail = true;
     const cm = all.match(/claim\s*(?:#|number|no\.?)\s*(?:is\s*)?:?\s*([A-Z0-9][A-Z0-9-]{5,20})\b/i); if (cm && /\d/.test(cm[1])) { f.claimInMsg = cm[1].toUpperCase(); }
@@ -308,12 +321,15 @@ const AIU_CORE = (env) => {
     const named = new Set(); for (const s of lab) { const p = pickCarrier(carrierHits(s)); if (p && p.name) named.add(p.name); }
     if (named.size === 1) f.carrierInMsg = [...named][0]; else if (named.size > 1) f.notes.push('messages name more than one carrier: ' + [...named].join(', '));
     if (/\b(?:filed|file[ds]?)\s+(?:a\s+)?claim|claim\s+(?:was\s+|has\s+been\s+)?filed/i.test(all)) f.claimFiledMsg = true;
+    // v1.1.0: an adjuster phone number written in a message is shown to a person, never filled automatically
+    const ap = all.match(new RegExp('(?:adjuster|adj\\.?)[^\\n]{0,60}?(' + PHONE + ')', 'i')); if (ap && fmtPhone(ap[1])) { f.adjPhoneMsg = fmtPhone(ap[1]); f.notes.push('a message gives an adjuster phone ' + f.adjPhoneMsg + ' (not filled automatically)'); }
     return f;
   }
 
   /* ---- deciding ---- */
   const isoDate = (o) => `${o.y}-${String(o.m).padStart(2, '0')}-${String(o.d).padStart(2, '0')}T00:00:00.000Z`;
-  const dayOf = (s) => { if (!s) return ''; const d = new Date(s); if (isNaN(d)) return ''; return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  // v1.1.0: take the calendar day exactly as AccuLynx wrote it, so time zones can't shift it by a day
+  const dayOf = (s) => { if (!s) return ''; const m = String(s).match(/^(\d{4}-\d{2}-\d{2})/); if (m) return m[1]; const d = new Date(s); if (isNaN(d)) return ''; return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
   const blank = (v) => v === null || v === undefined || String(v).trim() === '';
   const cmpClaim = (a, b) => String(a || '').toUpperCase().replace(/[^A-Z0-9]/g, '') === String(b || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
@@ -337,6 +353,9 @@ const AIU_CORE = (env) => {
     if (unreadable.length) res.flags.push('scope is a scan or picture the script can\'t read: ' + unreadable.join(', '));
     const picScopes = files.filter((f) => f.ext !== 'pdf' && /^(jpe?g|png|heic|heif|gif|tiff?|bmp|webp)$/.test(f.ext) && (/scope|loss/i.test(f.folder) || /scope|statement\s+of\s+loss/i.test(f.name)));
     if (!scope && picScopes.length) res.flags.push('scope is a photo the script can\'t read: ' + picScopes.map((f) => f.name).join(', '));
+    // v1.1.0: PDFs in the Scope of Loss folder that did not look like a scope are said out loud, not silently ignored
+    const notScopes = scopeCands.filter((f) => !unreadable.includes(f.name) && !(scope && f.name === scope.file));
+    if (!scope && notScopes.length && !unreadable.length) res.flags.push('read but did not recognize as a carrier scope: ' + notScopes.map((f) => f.name).join(', '));
     const msgs = await messages(row.id); const mf = scanMessages(msgs); res.msgFlags = mf;
     res.flags.push(...mf.notes);
     res.scope = scope;
@@ -403,7 +422,7 @@ const AIU_CORE = (env) => {
     if (res.adj) await post(`/api/jobs/${res.id}/SaveAdjusterInfo`, { JobDetail: res.adj, jobId: res.id });
     const { d } = await readInfo(res.id); const bad = [];
     if (res.ins) for (const k of ['InsuranceCompanyID', 'DamageLocation', 'ClaimField', 'ClaimNumber', 'HavePaperwork', 'InsuranceCompanyOtherName']) if (String(d[k] ?? '').toLowerCase() !== String(res.ins[k] ?? '').toLowerCase()) bad.push(k);
-    if (res.ins && res.ins.DateOfLoss && dayOf(d.DateOfLoss) !== String(res.ins.DateOfLoss).slice(0, 10) && dayOf(d.DateOfLoss) !== dayOf(res.ins.DateOfLoss)) bad.push('DateOfLoss');
+    if (res.ins && res.ins.DateOfLoss && dayOf(d.DateOfLoss) !== dayOf(res.ins.DateOfLoss)) bad.push('DateOfLoss');
     if (res.adj) for (const k of ['AdjusterName', 'AdjusterPhone', 'AdjusterExt', 'AdjusterFax', 'AdjusterEmail']) if (String(d[k] ?? '') !== String(res.adj[k] ?? '')) bad.push(k);
     // nothing we did not mean to touch may change
     for (const k of ['MetWithAdjuster', 'ClaimApproved']) if (!!d[k] !== !!res.before[k]) bad.push(k + ' changed unexpectedly');
@@ -417,12 +436,14 @@ const AIU_CORE = (env) => {
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.0.0';
-  const DEFAULTS = { dryRun: true, secondsBetweenLeads: 12, maxLeadsPerHour: 120, restMinutesAfterFullPass: 30, webhookUrl: '' };
+  const VERSION = '1.3.0';
+  // v1.1.0: maxLeadsThisRun stops a run after that many leads (0 = no limit)
+  const DEFAULTS = { secondsBetweenLeads: 12, maxLeadsPerHour: 120, restMinutesAfterFullPass: 30, webhookUrl: '', maxLeadsThisRun: 25 };
   const S = {
     get: (k, d) => { try { const v = GM_getValue(k); return v === undefined ? d : v; } catch (e) { return d; } },
     set: (k, v) => GM_setValue(k, v),
   };
+  // v1.2.0: there is no dry run any more; the script always saves. (Leads only seen in an old dry run get checked again.)
   const settings = () => ({ ...DEFAULTS, ...S.get('aiu_settings', {}) });
 
   function fetchPdf(href) {
@@ -447,9 +468,9 @@ const AIU_CORE = (env) => {
   /* ---- logs ---- */
   const cap = (arr, n) => (arr.length > n ? arr.slice(arr.length - n) : arr);
   function record(res) {
-    const done = S.get('aiu_done', {}); done[res.id] = { t: res.touched || '', r: res.result, rv: !!res.review, at: Date.now(), dry: !!settings().dryRun }; S.set('aiu_done', done);
+    const done = S.get('aiu_done', {}); done[res.id] = { t: res.touched || '', r: res.result, rv: !!res.review, at: Date.now(), dry: false }; S.set('aiu_done', done);
     const log = S.get('aiu_log', []);
-    log.push([new Date().toLocaleString(), res.name, res.link, res.milestone || '', settings().dryRun ? 'DRY RUN ' + res.result : res.result, res.set.join('; '), res.reason || '', res.flags.join('; '), res.verify || '']);
+    log.push([new Date().toLocaleString(), res.name, res.link, res.milestone || '', res.result, res.set.join('; '), res.reason || '', res.flags.join('; '), res.verify || '']);
     S.set('aiu_log', cap(log, 20000));
     if (res.scope) {
       const sc = res.scope; const rows = S.get('aiu_scopes', []);
@@ -462,6 +483,12 @@ const AIU_CORE = (env) => {
       rows.push(row); S.set('aiu_review', cap(rows, 20000)); sendSheet('Needs Review', row);
     }
     const c = S.get('aiu_counts', { updated: 0, nochange: 0, skipped: 0, review: 0, error: 0 }); c[res.result] = (c[res.result] || 0) + 1; if (res.review) c.review++; S.set('aiu_counts', c);
+    // v1.3.0: keep the last results where they can be audited (also written onto the panel as data-aiu)
+    try {
+      const sc = res.scope; const last = S.get('aiu_last', []);
+      last.push({ at: new Date().toLocaleTimeString(), n: res.name, l: res.link, r: res.result, set: res.set, fl: res.flags, v: res.verify || '', why: res.reason || '', sc: sc ? { f: sc.file, car: sc.carrier && (sc.carrier.name || (sc.carrier.tie || []).join('|')), claim: sc.claim, dol: sc.dol ? `${sc.dol.m}/${sc.dol.d}/${sc.dol.y}` : '', adj: sc.adjName, ph: sc.adjPhone, ext: sc.adjExt, op: sc.officePhone, fax: sc.fax, em: sc.adjEmail || sc.officeEmail } : null });
+      S.set('aiu_last', cap(last, 40)); if (host) host.setAttribute('data-aiu', JSON.stringify(cap(last, 40)));
+    } catch (e) { /* never let logging stop a run */ }
   }
   function sendSheet(tab, row) {
     const url = settings().webhookUrl; if (!url || !/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(url)) return;
@@ -481,11 +508,11 @@ const AIU_CORE = (env) => {
   const wait = async (ms) => { const end = Date.now() + ms; while (Date.now() < end) { if (stopAsked) throw new core.StopError(); holdLock(); await core.sleep(Math.min(5000, end - Date.now())); } };
   function hourOk() { const h = S.get('aiu_hour', { start: Date.now(), n: 0 }); if (Date.now() - h.start > 3600000) { S.set('aiu_hour', { start: Date.now(), n: 0 }); return 0; } return h.n >= settings().maxLeadsPerHour ? h.start + 3600000 - Date.now() : 0; }
   function countHour() { const h = S.get('aiu_hour', { start: Date.now(), n: 0 }); h.n++; S.set('aiu_hour', h); }
-  function needsWork(row) { const d = S.get('aiu_done', {})[row.id]; if (!d) return true; if (d.dry && !settings().dryRun) return true; if (d.r === 'error') return Date.now() - d.at > 6 * 3600000; return d.t !== (row.touched || '') && d.r !== 'skipped' ? true : false; }
+  function needsWork(row) { const d = S.get('aiu_done', {})[row.id]; if (!d) return true; if (d.dry) return true; if (d.r === 'error') return Date.now() - d.at > 6 * 3600000; return d.t !== (row.touched || '') && d.r !== 'skipped' ? true : false; }
 
   async function run() {
     if (running) return; if (!lockFree()) { alert('The insurance updater is already running in another AccuLynx tab. Use that tab, or close it and wait a minute.'); return; }
-    running = true; stopAsked = false; holdLock(); let errorsInRow = 0;
+    running = true; stopAsked = false; holdLock(); let errorsInRow = 0, ranThisRun = 0, pauseNote = '';
     try {
       for (;;) {
         let page = 1, pages = 1, worked = 0;
@@ -499,14 +526,18 @@ const AIU_CORE = (env) => {
             let res;
             try {
               res = await core.analyze(row); res.touched = row.touched;
-              if (res.result === 'updated' && !settings().dryRun) await core.save(res);
+              if (res.result === 'updated') await core.save(res);
               errorsInRow = 0;
             } catch (e) {
               if (e instanceof core.SessionError || e instanceof core.StopError) throw e;
               errorsInRow++; res = { id: row.id, name: row.name, link: 'https://my.acculynx.com/jobs/' + row.id, set: [], flags: ['error: ' + e.message], result: 'error', review: false, touched: row.touched };
               if (errorsInRow >= 5) { say('5 errors in a row, resting 15 min'); await wait(15 * 60000); errorsInRow = 0; }
             }
-            record(res); countHour(); worked++; render();
+            record(res); countHour(); worked++; ranThisRun++; render();
+            // v1.1.0 guard 1: after the very first live save, stop so a person can check that lead in AccuLynx
+            if (res.result === 'updated' && res.verify && !S.get('aiu_firstOk_110', false)) { S.set('aiu_firstOk_110', true); pauseNote = 'PAUSED after the first live save. Open ' + res.link + ' and check it (dates, adjuster, text opt-in), then press Start.'; throw new core.StopError(); }
+            // v1.1.0 guard 2: stop after the number of leads set in the panel
+            const limit = +settings().maxLeadsThisRun || 0; if (limit && ranThisRun >= limit) { pauseNote = 'Finished the ' + limit + '-lead run. Press Start for another batch.'; throw new core.StopError(); }
             await wait(settings().secondsBetweenLeads * 1000);
           }
           page++; await wait(1500);
@@ -518,7 +549,7 @@ const AIU_CORE = (env) => {
       if (e instanceof core.SessionError) {
         say('PAUSED: AccuLynx signed out. Sign in again, then press Start.');
         try { GM_notification({ title: 'Amos insurance updater paused', text: 'AccuLynx signed out. Sign in again, then press Start.', timeout: 0 }); } catch (x) {}
-      } else if (e instanceof core.StopError) say('Stopped');
+      } else if (e instanceof core.StopError) say(pauseNote || 'Stopped');
       else say('Stopped by an error: ' + e.message);
     } finally { running = false; S.set('aiu_lock', null); render(); }
   }
@@ -530,12 +561,15 @@ const AIU_CORE = (env) => {
     root.querySelector('#st').textContent = status;
     root.querySelector('#ct').textContent = `Checked ${n} of ${S.get('aiu_total', '?')} leads · updated ${c.updated || 0} · no changes ${c.nochange || 0} · skipped ${c.skipped || 0} · needs review ${c.review || 0} · errors ${c.error || 0}`;
     root.querySelector('#go').textContent = running ? 'Stop' : 'Start';
-    root.querySelector('#dry').checked = !!st.dryRun;
-    root.querySelector('#mode').textContent = st.dryRun ? 'DRY RUN: nothing is saved' : 'LIVE: saving to AccuLynx';
-    root.querySelector('#mode').style.color = st.dryRun ? '#555' : '#b00020';
+    root.querySelector('#mode').textContent = 'LIVE: saving to AccuLynx';
+    root.querySelector('#mode').style.color = '#b00020';
   }
   function panel() {
-    host = document.createElement('div'); host.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483646;';
+    host = document.createElement('div'); host.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483646;';
+    const clamp = (x, y) => [Math.min(Math.max(0, x), Math.max(0, window.innerWidth - 60)), Math.min(Math.max(0, y), Math.max(0, window.innerHeight - 40))];
+    const place = (x, y) => { const c = clamp(x, y); host.style.left = c[0] + 'px'; host.style.top = c[1] + 'px'; return c; };
+    const pos = S.get('aiu_pos', null); if (pos && isFinite(pos.x) && isFinite(pos.y)) place(pos.x, pos.y); else place(window.innerWidth - 340, 110);
+    window.addEventListener('resize', () => place(host.offsetLeft, host.offsetTop));
     root = host.attachShadow({ mode: 'open' });
     root.innerHTML = `<style>.b{font:13px system-ui,sans-serif;background:#fff;color:#222;border:1px solid #999;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.25);padding:10px;width:320px}
       .h{font-weight:600;display:flex;justify-content:space-between;cursor:pointer}.x{display:none;margin-top:8px}.open .x{display:block}button{margin:3px 3px 0 0;padding:4px 8px;font:12px system-ui}
@@ -543,18 +577,27 @@ const AIU_CORE = (env) => {
       <div class="b" id="b"><div class="h" id="hd"><span>Insurance updater v${VERSION}</span><span id="mode"></span></div>
       <div class="x"><div id="st"></div><div id="ct"></div>
       <button id="go">Start</button><button id="ex">Export CSVs</button><button id="cl">Clear logs</button>
-      <label><input type="checkbox" id="dry"> Dry run (look only, save nothing)</label>
       <label>Seconds between leads <input type="number" id="sec" min="5" max="600"></label>
       <label>Most leads per hour <input type="number" id="hr" min="1" max="600"></label>
+      <label>Stop after this many leads (0 = no limit) <input type="number" id="mx" min="0" max="5000"></label>
       <label>Google Sheet web app link (optional)<input type="text" id="wh" placeholder="https://script.google.com/macros/s/.../exec"></label>
       <button id="sv">Save settings</button></div></div>`;
     document.documentElement.appendChild(host);
-    const st = settings(); root.querySelector('#sec').value = st.secondsBetweenLeads; root.querySelector('#hr').value = st.maxLeadsPerHour; root.querySelector('#wh').value = st.webhookUrl;
+    try { host.setAttribute('data-aiu', JSON.stringify(S.get('aiu_last', []))); } catch (e) { /* ignore */ }
+    const st = settings(); root.querySelector('#sec').value = st.secondsBetweenLeads; root.querySelector('#hr').value = st.maxLeadsPerHour; root.querySelector('#mx').value = st.maxLeadsThisRun; root.querySelector('#wh').value = st.webhookUrl;
     const b = root.querySelector('#b'); if (S.get('aiu_open', false)) b.classList.add('open');
-    root.querySelector('#hd').onclick = () => { b.classList.toggle('open'); S.set('aiu_open', b.classList.contains('open')); };
-    root.querySelector('#go').onclick = () => { if (running) { stopAsked = true; say('Stopping...'); } else run(); };
-    root.querySelector('#dry').onchange = (e) => { if (!e.target.checked && !confirm('Turn off dry run? The script will SAVE insurance and adjuster fields on leads.')) { e.target.checked = true; return; } S.set('aiu_settings', { ...settings(), dryRun: e.target.checked }); render(); };
-    root.querySelector('#sv').onclick = () => { const sec = Math.max(5, +root.querySelector('#sec').value || 12), hr = Math.max(1, +root.querySelector('#hr').value || 120), wh = root.querySelector('#wh').value.trim(); if (wh && !/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(wh)) { alert('That link does not look like a Google Apps Script web app link (it should start with https://script.google.com/macros/s/ and end with /exec).'); return; } S.set('aiu_settings', { ...settings(), secondsBetweenLeads: sec, maxLeadsPerHour: hr, webhookUrl: wh }); alert('Saved.'); };
+    // v1.2.0: drag the title bar to move the box; a plain click on it still opens/closes it
+    const hd = root.querySelector('#hd'); let drag = null;
+    hd.style.cursor = 'move'; hd.style.userSelect = 'none'; hd.title = 'Drag to move. Click to open or close.';
+    hd.addEventListener('pointerdown', (e) => { if (e.button !== 0) return; drag = { sx: e.clientX, sy: e.clientY, ox: host.offsetLeft, oy: host.offsetTop, moved: false }; try { hd.setPointerCapture(e.pointerId); } catch (x) {} });
+    hd.addEventListener('pointermove', (e) => { if (!drag) return; const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy; if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 5) return; drag.moved = true; place(drag.ox + dx, drag.oy + dy); });
+    hd.addEventListener('pointerup', () => { if (!drag) return; const d = drag; drag = null; if (d.moved) S.set('aiu_pos', { x: host.offsetLeft, y: host.offsetTop }); else { b.classList.toggle('open'); S.set('aiu_open', b.classList.contains('open')); } });
+    hd.addEventListener('pointercancel', () => { drag = null; });
+    root.querySelector('#go').onclick = () => {
+      if (running) { stopAsked = true; say('Stopping...'); return; }
+      run();
+    };
+    root.querySelector('#sv').onclick = () => { const sec = Math.max(5, +root.querySelector('#sec').value || 12), hr = Math.max(1, +root.querySelector('#hr').value || 120), mx = Math.max(0, +root.querySelector('#mx').value || 0), wh = root.querySelector('#wh').value.trim(); if (wh && !/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(wh)) { alert('That link does not look like a Google Apps Script web app link (it should start with https://script.google.com/macros/s/ and end with /exec).'); return; } S.set('aiu_settings', { ...settings(), secondsBetweenLeads: sec, maxLeadsPerHour: hr, maxLeadsThisRun: mx, webhookUrl: wh }); say('Settings saved'); };
     root.querySelector('#ex').onclick = () => {
       const day = new Date().toISOString().slice(0, 10);
       download(`insurance-updater-log-${day}.csv`, csv(S.get('aiu_log', []), ['When', 'Lead', 'Link', 'Milestone', 'Result', 'Fields set', 'Reason', 'Flags', 'Read-back']));
