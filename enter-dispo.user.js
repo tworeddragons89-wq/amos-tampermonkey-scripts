@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos - Enter Dispo
 // @namespace    amos-exteriors
-// @version      2.5
+// @version      2.7
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @description  Adds an "Enter Dispo" button to a rep's GroupMe dispos. Click it to post the dispo as a comment on the lead's AccuLynx job, then reply "current" in the rep's thread.
@@ -77,26 +77,38 @@
     d.textContent = 'Enter Dispo: ' + msg;
   }
   const visible = (el) => el && el.offsetParent !== null;
-  const norm =(s) => String(s).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
 
   // <parse>
+  // Find an AccuLynx job number ("IN-4521") in the dispo. Careful: a state + ZIP such as
+  // "Anytown, IN 46000" looks like a job number but is not one, and neither is "in 2027".
+  function findJobNum(text) {
+    for (const m of text.matchAll(/(^|[^A-Za-z0-9])(in)([-\s]?)(\d{3,6})\b/gi)) {
+      const before = text.slice(0, m.index + m[1].length);
+      if (/,\s*$/.test(before)) continue;                          // ", IN 46000" = state + ZIP
+      if (m[3] !== '-' && m[2] !== 'IN') continue;                 // plain word "in 500" is not a job #
+      if (m[3] !== '-' && /^4[67]\d{3}$/.test(m[4])) continue;     // Indiana ZIP code
+      return 'IN-' + m[4];
+    }
+    return '';
+  }
   // Work out how to find the lead in AccuLynx. AccuLynx search takes a Job #,
   // customer name or address (NOT a phone number), so: job # first, then name.
   function parseLead(text) {
     const lines = text.split('\n').map((s) => s.trim()).filter(Boolean);
-    const jm = text.match(/\bIN[-\s]?(\d{3,6})\b/i);
-    const jobNum = jm ? 'IN-' + jm[1] : '';
+    const jobNum = findJobNum(text);
     const addrLine = lines.find((l) => /^\d{1,6}\s+[A-Za-z]/.test(l) && !/^\d{3}[\s.)-]+\d{3}/.test(l));
     const addr = addrLine ? norm(addrLine).split(' ').slice(0, 2).join(' ') : '';
 
-    const isCityLine = (l) => /^[A-Za-z .'-]+,\s*[A-Z]{2}\b/.test(l);
+    const isCityLine = (l) => /^[A-Za-z .'-]+,\s*([A-Z]{2}\b|Indiana|Ohio|Kentucky|Illinois|Michigan)/.test(l);
     const lastFirst = /^[A-Za-z'’.\-]+(\s[A-Za-z'’.\-]+)?\s*,\s*[A-Za-z]/;   // "Doe, Jane and John" / "Smith , Anna"
-    let nameLine = lines.slice(0, 6).find((l) => lastFirst.test(l) && !isCityLine(l) && !/^\w+:/.test(l));
+    const headerLine = lines.slice(0, 3).find((l) => /^IN[-\s]?\d{3,6}\s*[:\-]?\s*[A-Za-z]/.test(l));   // "IN-4521 Jane Doe"
+    let nameLine = headerLine || lines.slice(0, 6).find((l) => lastFirst.test(l) && !isCityLine(l) && !/^\w+:/.test(l));
     if (!nameLine) {
       nameLine = lines.find((l) => !/^\d/.test(l) && !/:\s*$/.test(l) && !/^(customer|job|lead|product|demo|price|payment)/i.test(l));
     }
     let tokens = [], search = '';
-    if (nameLine && lastFirst.test(nameLine)) {               // "Doe, Jane and John"
+    if (nameLine && lastFirst.test(nameLine) && !isCityLine(nameLine)) {   // "Doe, Jane and John"
       const [last, rest] = nameLine.split(',');
       tokens = [...norm(last).split(' '), norm(rest).split(' ')[0]].filter(Boolean);
       search = last.trim();
@@ -225,7 +237,9 @@
         clone.querySelectorAll('button').forEach((b) => b.remove());
         text = clone.innerText.replace(/^.*\d{1,2}:\d{2}\s*(AM|PM)\s*\n+/i, '').trim();
       }
-      return text;
+      // GroupMe can leave invisible placeholder characters in a name ("Smith<obj>, John"); they break name matching.
+      // Written as escapes (object-replacement char, zero-width chars, BOM) so copy/paste can never corrupt the range.
+      return text.replace(/[￼​-‍⁠﻿]/g, '');
     }
 
     // Time of a post. GroupMe shows the time only on the first of several back-to-back
@@ -276,6 +290,7 @@
             const jm = typed.match(/IN[-\s]?(\d{3,6})/i);
             lead.jobNum = jm ? 'IN-' + jm[1] : '';
             lead.search = typed.trim();
+            lead.alts = [];
             lead.tokens = norm(typed).split(' ').filter(Boolean);
             lead.addr = '';
           }
@@ -347,6 +362,7 @@
   if (location.host === 'my.acculynx.com') {
     const SKEY = 'amosDispoTab';
     const JOB_RE = /\/jobs\/[0-9a-f-]{36}/i;
+    let posting = false;                                     // blocks a second postComment while one is running
 
     (async function run() {
       const job = GM_getValue(KEY_JOB);
@@ -429,10 +445,19 @@
     const fail = (msg) => toast(msg, '#c33');
 
     async function postComment(job) {
+      if (posting) return;
       if (sessionStorage.getItem('amosDispoPosted') === String(job.created)) return;   // never post twice
       const id = location.pathname.match(JOB_RE)[0];
       if (!/\/comments/i.test(location.pathname)) { location.href = id + '/comments'; return; }  // Messages tab
+      posting = true;
+      try {
+        await postCommentInner(job);
+      } finally {
+        posting = false;
+      }
+    }
 
+    async function postCommentInner(job) {
       // Make sure this is the right job before posting anything
       // (A lead has no IN number in its title; then its own emails/comments must mention the number.)
       if (job.jobNum) {
