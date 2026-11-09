@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.6.6
+// @version      5.6.7
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply entering/entered.
@@ -89,7 +89,7 @@
   // They survive into names and file names, so scrub them before anything else looks at the message.
   const deGhost = t => (t || '').replace(/[\uFFFC\uFEFF\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, '');
   function parseLead(text, repName) {
-    text = deGhost(text);
+    text = deGhost(text).replace(/\b(\d{1,3}),(\d{3})\b(?!,\d)/g, "$1$2");   // "3,000 Main Street" → 3000
     const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
     const phoneRe = /(\(?\d{3}\)?[\s.\-]{0,3}\d{3}[\s.\-]{0,3}\d{4})/;
     const phoneLine = lines.findIndex(l => phoneRe.test(l));
@@ -181,7 +181,7 @@
   const MONTHS = ['january','february','march','april','may','june','july','august','september','october','november','december'];
   const SW = 'street|st|road|rd|drive|dr|lane|ln|avenue|ave|court|ct|circle|cir|way|boulevard|blvd|place|pl|trail|trl|parkway|pkwy|highway|hwy|pike|terrace|ter|loop|run|cove|cv|bend|point|pt|path|square|sq';
   function parseDictatedLead(text, repName) {
-    text = deGhost(text);
+    text = deGhost(text).replace(/\b(\d{1,3}),(\d{3})\b(?!,\d)/g, "$1$2");   // "3,000 Main Street" → 3000
     // drop any header line GroupMe may leave in ("JI", "James Isaac12:36 PM") before flattening
     const flat = text.split(/\r?\n/).filter(l => l.trim() && !/^[A-Z]{1,3}$/.test(l.trim()) && !/(\d{1,2}:\d{2}\s*[AP]M|Just now|Yesterday)\s*$/i.test(l.trim()))
                      .join(' ').replace(/\s+/g, ' ').trim();
@@ -229,7 +229,14 @@
     if (/door/i.test(after)) prod.push('Doors');
     if (/sof+it+|fa[sc]+ia/i.test(after)) prod.push('Soffit/Fascia');
     lead.productText = prod.join(' / ') || 'NA';
-    if (after) lead.extra.push(after);
+    // Concerns: a short line of its own that is only the appointment ("GUTTER EST. WED 11/25/@2PM") is already in the
+    // appointment and the products – leave it out; sentences that mention a date stay as written
+    const pAt = text.indexOf(phoneM[1]);
+    const afterLines = pAt >= 0 ? text.slice(pAt + phoneM[1].length).split(/\r?\n/).map(l => l.trim()).filter(Boolean) : [after];
+    if (afterLines.length) afterLines[0] = afterLines[0].replace(/^\s*(phone number|number|cell)?\s*/i, '').trim();
+    const apptOnly = l => l.length < 40 && (/\d{1,2}\/\d{1,2}/.test(l) || new RegExp('\\b(' + MONTHS.map(m => m.slice(0, 3)).join('|') + ')[a-z]*\\.?\\s+\\d', 'i').test(l));
+    const concern = afterLines.length > 1 ? afterLines.filter(l => !apptOnly(l)).join(' ').replace(/\s+/g, ' ').trim() : after;
+    if (concern) lead.extra.push(concern);
     return lead;
   }
   // "Friday October 30th at noon", "October 7th at 4:00 p.m.", "Saturday 10:31 at 10:00 a.m." (10.31 → 10/31)
@@ -799,19 +806,31 @@
     }
     return new Promise(r => cv.toBlob(r, 'image/jpeg', 0.9));
   }
-  async function uploadPhotos(files) {
+  async function uploadPhotos(files, retry = 1) {
+    if (files.some(f => !f.size || f.size < 2000)) throw new Error('the picture download came back empty');
+    const upBtn = () => [...document.querySelectorAll('button')].find(b => visible(b) && b.textContent.trim() === 'Upload');
+    // the previous upload window must be CLOSED first – starting while it was still finishing made the 3rd photo fail
+    await waitFor(() => !upBtn(), 30000, 500);
+    await sleep(800);
     const add = await waitFor(() => clickText('Add Photos', document, 'button'));
     if (!add) throw new Error('Add Photos button not found');
     add.click();
-    const input = await waitFor(() => document.querySelector('input[type=file]'));
+    await sleep(1200);
+    const input = await waitFor(() => { const all = document.querySelectorAll('input[type=file]'); return all[all.length - 1]; });   // the NEWEST upload window's input
     if (!input) throw new Error('photo file input not found');
     const dt = new DataTransfer(); files.forEach(f => dt.items.add(f));
     input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
     await sleep(2500);
-    const up = await waitFor(() => { const b = clickText('Upload', document, 'button'); return b && !b.disabled ? b : null; });
-    if (!up) throw new Error('Upload button not found');
+    const up = await waitFor(() => { const b = upBtn(); return b && !b.disabled ? b : null; }, 15000);
+    if (!up) {
+      const cancel = [...document.querySelectorAll('button,a')].filter(b => visible(b) && b.textContent.trim() === 'Cancel').pop();
+      if (cancel) { cancel.click(); await sleep(1500); }
+      if (retry > 0) return uploadPhotos(files, retry - 1);
+      throw new Error('Upload button not found');
+    }
     up.click();
-    if (!await waitFor(() => /successfully uploaded/i.test(document.body.innerText), 60000)) throw new Error('upload did not confirm');
+    if (!await waitFor(() => /successfully uploaded/i.test(document.body.innerText) || !upBtn(), 60000)) throw new Error('upload did not confirm');
+    await waitFor(() => !upBtn(), 30000, 500);
   }
   async function replyInThread(text, notify) {
     const ed = await waitFor(() => [...document.querySelectorAll('[contenteditable="true"]')].find(visible));
@@ -1140,9 +1159,10 @@
           // The picker does NOT list photos newest-first, so pick by FILE NAME – never the lead sheet.
           // Each thumbnail's address ends in ".../<file name>/w_200,h_200/".
           // match the ENDING only – AccuLynx rewrites the name part of the file (odd characters are dropped)
-          const photosTab = [...document.querySelectorAll('a,button,li,div')]
-            .find(e => visible(e) && e.children.length < 3 && e.textContent.trim() === 'Photos');
-          if (photosTab) { photosTab.click(); await sleep(800); }      // make sure we are on the Photos tab
+          // ONLY the picker's own tab – the page header also has a "Photos" button, and clicking that one emptied the picker
+          const photosTab = [...document.querySelectorAll('button.file-picker-tabs__tab')]
+            .find(e => visible(e) && e.textContent.trim() === 'Photos');
+          if (photosTab && !photosTab.classList.contains('current')) { photosTab.click(); await sleep(800); }
           const wanted = [/_house\.jpg/i, /_overview\.jpg/i];
           const thumb = await waitFor(() => {
             const items = [...document.querySelectorAll('li.attachment')];
