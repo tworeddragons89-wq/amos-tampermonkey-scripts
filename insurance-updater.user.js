@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Insurance Updater (AccuLynx)
 // @namespace    amos-exteriors
-// @version      1.3.4
+// @version      1.3.5
 // @description  Fills blank Insurance and Adjuster fields on Inspection/Insurance leads from the carrier's scope, and lists everything it can't decide for a person to review.
 // @match        https://my.acculynx.com/*
 // @grant        GM_xmlhttpRequest
@@ -438,7 +438,7 @@ const AIU_CORE = (env) => {
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.3.4';
+  const VERSION = '1.3.5';
   // v1.1.0: maxLeadsThisRun stops a run after that many leads (0 = no limit)
   const DEFAULTS = { secondsBetweenLeads: 12, maxLeadsPerHour: 120, restMinutesAfterFullPass: 30, webhookUrl: '', maxLeadsThisRun: 25 };
   const S = {
@@ -480,6 +480,7 @@ const AIU_CORE = (env) => {
       const row = [res.name, res.link, res.milestone, carrier, sc.claim || '', sc.dol ? `${sc.dol.m}/${sc.dol.d}/${sc.dol.y}` : '', sc.file, sc.lossType || '', sc.adjName || '', sc.adjPhone ? sc.adjPhone + (sc.adjExt ? ' x' + sc.adjExt : '') : '', res.flags.join('; ')];
       if (!rows.some((r) => r[1] === res.link && r[6] === sc.file)) { rows.push(row); S.set('aiu_scopes', cap(rows, 20000)); sendSheet('Scope Log', row); }
     }
+    if (res.result === 'updated') sendSheet('Changes', [new Date().toLocaleString(), res.name, res.link, res.milestone || '', res.set.join('; '), res.flags.join('; '), res.verify || '']); /* v1.3.5: every change goes to the sheet */
     if (res.review) {
       const rows = S.get('aiu_review', []); const row = [new Date().toLocaleDateString(), res.name, res.link, res.milestone || '', res.flags.join('; '), res.set.join('; ')];
       rows.push(row); S.set('aiu_review', cap(rows, 20000)); sendSheet('Needs Review', row);
@@ -489,7 +490,7 @@ const AIU_CORE = (env) => {
     try {
       const sc = res.scope; const last = S.get('aiu_last', []);
       last.push({ at: new Date().toLocaleTimeString(), n: res.name, l: res.link, r: res.result, set: res.set, fl: res.flags, v: res.verify || '', why: res.reason || '', sc: sc ? { f: sc.file, car: sc.carrier && (sc.carrier.name || (sc.carrier.tie || []).join('|')), claim: sc.claim, dol: sc.dol ? `${sc.dol.m}/${sc.dol.d}/${sc.dol.y}` : '', adj: sc.adjName, ph: sc.adjPhone, ext: sc.adjExt, op: sc.officePhone, fax: sc.fax, em: sc.adjEmail || sc.officeEmail } : null });
-      S.set('aiu_last', cap(last, 40)); if (host) host.setAttribute('data-aiu', JSON.stringify(cap(last, 40)));
+      S.set('aiu_last', cap(last, 300)); if (host) host.setAttribute('data-aiu', JSON.stringify(cap(last, 300)));
     } catch (e) { /* never let logging stop a run */ }
   }
   function sendSheet(tab, row) {
