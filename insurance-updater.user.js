@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Insurance Updater (AccuLynx)
 // @namespace    amos-exteriors
-// @version      1.3.2
+// @version      1.3.3
 // @description  Fills blank Insurance and Adjuster fields on Inspection/Insurance leads from the carrier's scope, and lists everything it can't decide for a person to review.
 // @match        https://my.acculynx.com/*
 // @grant        GM_xmlhttpRequest
@@ -373,7 +373,7 @@ const AIU_CORE = (env) => {
       want.ClaimField = true; src.ClaimField = ctx; if (scope.claim) { want.ClaimNumber = scope.claim; src.ClaimNumber = ctx; }
       want.HavePaperwork = true; src.HavePaperwork = ctx;
       if (scope.adjName) { wantAdj.AdjusterName = scope.adjName; }
-      const phone = scope.adjPhone || scope.officePhone; if (phone) { wantAdj.AdjusterPhone = phone; if (scope.adjPhone && scope.adjExt) wantAdj.AdjusterExt = scope.adjExt; }
+      const phone = scope.adjPhone; /* v1.3.3: never use the letterhead/office phone as the adjuster phone (it can be the customer's own number) */ if (phone) { wantAdj.AdjusterPhone = phone; if (scope.adjPhone && scope.adjExt) wantAdj.AdjusterExt = scope.adjExt; }
       if (scope.fax) wantAdj.AdjusterFax = scope.fax;
       const em = scope.adjEmail || scope.officeEmail; if (em) wantAdj.AdjusterEmail = em;
       res.flags.push(...scope.flags);
@@ -436,7 +436,7 @@ const AIU_CORE = (env) => {
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.3.2';
+  const VERSION = '1.3.3';
   // v1.1.0: maxLeadsThisRun stops a run after that many leads (0 = no limit)
   const DEFAULTS = { secondsBetweenLeads: 12, maxLeadsPerHour: 120, restMinutesAfterFullPass: 30, webhookUrl: '', maxLeadsThisRun: 25 };
   const S = {
