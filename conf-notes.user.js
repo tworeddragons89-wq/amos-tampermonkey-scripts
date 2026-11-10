@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CONF NOTES
 // @namespace    amos-exteriors
-// @version      1.1
+// @version      1.2
 // @description  Adds a small red "CONF" button that fills in the confirmation notes template with one click. It shows up next to the paper clip on comment and reply boxes, and above the Notes box when creating a new lead.
 // @match        https://my.acculynx.com/*
 // @grant        none
@@ -13,7 +13,7 @@
 
   const BTN_ATTR = 'data-amos-conf-btn';
 
-  // The EXACT confirmation template, double spaced (a blank line between each line).
+  // The EXACT confirmation template: one line each, then a blank line, then CONF.
   // Some lines end with a space on purpose.
   const CONF_TEMPLATE = [
     'Lead Source:  ',
@@ -28,7 +28,7 @@
     'Work Schedules ',
     'Mrs: ',
     'Mr:',
-  ].join('\n\n');
+  ].join('\n') + '\n\nCONF';
 
   // Put the text in the box so AccuLynx notices it
   function fillTextarea(ta, text) {
