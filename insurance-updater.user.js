@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Insurance Updater (AccuLynx)
 // @namespace    amos-exteriors
-// @version      1.3.5
+// @version      1.3.6
 // @description  Fills blank Insurance and Adjuster fields on Inspection/Insurance leads from the carrier's scope, and lists everything it can't decide for a person to review.
 // @match        https://my.acculynx.com/*
 // @grant        GM_xmlhttpRequest
@@ -425,7 +425,7 @@ const AIU_CORE = (env) => {
     const { d } = await readInfo(res.id); const bad = [];
     if (res.ins) for (const k of ['InsuranceCompanyID', 'DamageLocation', 'ClaimField', 'ClaimNumber', 'HavePaperwork', 'InsuranceCompanyOtherName']) if (String(d[k] ?? '').toLowerCase() !== String(res.ins[k] ?? '').toLowerCase()) bad.push(k);
     if (res.ins && res.ins.DateOfLoss && dayOf(d.DateOfLoss) !== dayOf(res.ins.DateOfLoss)) bad.push('DateOfLoss');
-    if (res.adj) for (const k of ['AdjusterName', 'AdjusterPhone', 'AdjusterExt', 'AdjusterFax', 'AdjusterEmail']) if (String(d[k] ?? '') !== String(res.adj[k] ?? '')) bad.push(k);
+    if (res.adj) for (const k of ['AdjusterName', 'AdjusterPhone', 'AdjusterExt', 'AdjusterFax', 'AdjusterEmail']) { const a = String(d[k] ?? ''), b = String(res.adj[k] ?? ''); /* v1.3.6: AccuLynx reformats phone numbers on save, so compare phones and fax by digits only */ if (/Phone$|Fax$/.test(k) ? a.replace(/\D/g, '') !== b.replace(/\D/g, '') : a !== b) bad.push(k); }
     // nothing we did not mean to touch may change
     for (const k of ['MetWithAdjuster', 'ClaimApproved']) if (!!d[k] !== !!res.before[k]) bad.push(k + ' changed unexpectedly');
     if (bad.length) { res.flags.push('read-back did not match for: ' + bad.join(', ')); res.review = true; res.verify = 'mismatch'; } else res.verify = 'ok';
@@ -438,7 +438,7 @@ const AIU_CORE = (env) => {
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.3.5';
+  const VERSION = '1.3.6';
   // v1.1.0: maxLeadsThisRun stops a run after that many leads (0 = no limit)
   const DEFAULTS = { secondsBetweenLeads: 12, maxLeadsPerHour: 120, restMinutesAfterFullPass: 30, webhookUrl: '', maxLeadsThisRun: 25 };
   const S = {
@@ -518,10 +518,15 @@ const AIU_CORE = (env) => {
     running = true; stopAsked = false; holdLock(); let errorsInRow = 0, ranThisRun = 0, pauseNote = '';
     try {
       for (;;) {
-        let page = 1, pages = 1, worked = 0;
+        let page = 1, pages = 1, worked = 0, bigTotal = 0;
         while (page <= pages) {
           say('Reading the lead list, page ' + page);
-          const lp = await core.listPage(page); pages = Math.min(lp.pages || 1, 2000); S.set('aiu_total', lp.total); if (!lp.rows.length) break;
+          let lp = await core.listPage(page);
+          /* v1.3.6: a glitchy list answer (empty page or a tiny total) must not end the pass early and trigger a 30-min rest; retry, then stop with an error */
+          for (let tries = 0; tries < 3 && (!lp.rows.length || (bigTotal && lp.total < bigTotal / 2)) && page <= Math.ceil(bigTotal / 20); tries++) { say('The lead list looked wrong (page ' + page + '), retrying in 20 s'); await wait(20000); lp = await core.listPage(page); }
+          if (bigTotal && page <= Math.ceil(bigTotal / 20) && (!lp.rows.length || lp.total < bigTotal / 2)) throw new Error('lead list answered oddly on page ' + page + ' (total ' + lp.total + ', expected about ' + bigTotal + ')');
+          if (lp.total > bigTotal) bigTotal = lp.total;
+          pages = Math.min(lp.pages || 1, 2000); S.set('aiu_total', lp.total); if (!lp.rows.length) break;
           for (const row of lp.rows) {
             if (!needsWork(row)) continue;
             const w = hourOk(); if (w) { say('Hourly limit reached, resting ' + Math.ceil(w / 60000) + ' min'); await wait(w); }
