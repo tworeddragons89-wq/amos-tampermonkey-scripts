@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Insurance Updater (AccuLynx)
 // @namespace    amos-exteriors
-// @version      1.3.1
+// @version      1.3.2
 // @description  Fills blank Insurance and Adjuster fields on Inspection/Insurance leads from the carrier's scope, and lists everything it can't decide for a person to review.
 // @match        https://my.acculynx.com/*
 // @grant        GM_xmlhttpRequest
@@ -203,7 +203,7 @@ const AIU_CORE = (env) => {
   const LIST_URL = (page) => '/api/joblist?filters=currentMilestoneList%3DAssigned&filters=currentMilestoneList%3DProspect&filters=currentMilestoneList%3DDead&filters=workTypes%3DInspection&filters=workTypes%3DInsurance&loadAll=false&onlyBalanceDue=false&onlyWatchList=false&query=&sort=lastTouched%7Cdesc&type=2&page=' + page;
   async function listPage(page) {
     const j = await api(LIST_URL(page));
-    return { total: j.TotalRecords, pages: j.TotalPages, rows: (j.results || []).map((r) => ({ id: r.Id, name: r.JobNameWithJobNumber || r.Name, milestone: r.CurrentMilestone, touched: r.LastTouchedUTC || r.LastTouched, workTypes: r.WorkTypes })) };
+    return { total: j.TotalRecords, pages: j.TotalPages || Math.ceil((j.TotalRecords || 0) / Math.max(1, (j.results || []).length || 20)) /* v1.3.2: the API reports 0 pages, so work it out from the total */, rows: (j.results || []).map((r) => ({ id: r.Id, name: r.JobNameWithJobNumber || r.Name, milestone: r.CurrentMilestone, touched: r.LastTouchedUTC || r.LastTouched, workTypes: r.WorkTypes })) };
   }
   async function milestone(id) { const b = await api(`/api/jobs/${id}/GetJobBootstrap`); return String((b && b.Job && b.Job.CurrentMilestone) || '').toLowerCase(); }
   let carrierList = null, carrierListAt = 0;
@@ -436,7 +436,7 @@ const AIU_CORE = (env) => {
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.3.1';
+  const VERSION = '1.3.2';
   // v1.1.0: maxLeadsThisRun stops a run after that many leads (0 = no limit)
   const DEFAULTS = { secondsBetweenLeads: 12, maxLeadsPerHour: 120, restMinutesAfterFullPass: 30, webhookUrl: '', maxLeadsThisRun: 25 };
   const S = {
@@ -518,7 +518,7 @@ const AIU_CORE = (env) => {
         let page = 1, pages = 1, worked = 0;
         while (page <= pages) {
           say('Reading the lead list, page ' + page);
-          const lp = await core.listPage(page); pages = Math.min(lp.pages || 1, 2000); S.set('aiu_total', lp.total);
+          const lp = await core.listPage(page); pages = Math.min(lp.pages || 1, 2000); S.set('aiu_total', lp.total); if (!lp.rows.length) break;
           for (const row of lp.rows) {
             if (!needsWork(row)) continue;
             const w = hourOk(); if (w) { say('Hourly limit reached, resting ' + Math.ceil(w / 60000) + ' min'); await wait(w); }
