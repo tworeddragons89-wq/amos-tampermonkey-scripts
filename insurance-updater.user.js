@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Insurance Updater (AccuLynx)
 // @namespace    amos-exteriors
-// @version      1.3.3
+// @version      1.3.4
 // @description  Fills blank Insurance and Adjuster fields on Inspection/Insurance leads from the carrier's scope, and lists everything it can't decide for a person to review.
 // @match        https://my.acculynx.com/*
 // @grant        GM_xmlhttpRequest
@@ -375,7 +375,9 @@ const AIU_CORE = (env) => {
       if (scope.adjName) { wantAdj.AdjusterName = scope.adjName; }
       const phone = scope.adjPhone; /* v1.3.3: never use the letterhead/office phone as the adjuster phone (it can be the customer's own number) */ if (phone) { wantAdj.AdjusterPhone = phone; if (scope.adjPhone && scope.adjExt) wantAdj.AdjusterExt = scope.adjExt; }
       if (scope.fax) wantAdj.AdjusterFax = scope.fax;
-      const em = scope.adjEmail || scope.officeEmail; if (em) wantAdj.AdjusterEmail = em;
+      const em = scope.adjEmail || scope.officeEmail;
+      /* v1.3.4: only fill the e-mail when it clearly belongs to the adjuster named in the scope (the name is in the address); otherwise flag it */
+      if (em) { const parts = String(scope.adjName || '').toLowerCase().replace(/[^a-z ]/g, '').split(/\s+/).filter(Boolean); const first = parts[0] || '', last = parts[parts.length - 1] || ''; const local = em.split('@')[0].toLowerCase().replace(/[^a-z]/g, ''); const ok = last.length >= 3 && (local.includes(last) || (first && local.startsWith(first[0]) && local.includes(last.slice(0, Math.min(last.length, 5))))); if (ok) wantAdj.AdjusterEmail = em; else res.flags.push('note: scope shows e-mail ' + em + ' but it does not match the adjuster name; not filled'); }
       res.flags.push(...scope.flags);
     } else {
       if (mf.carrierInMsg) { const c = carrierToList(mf.carrierInMsg, companies); if (c && c.id && !c.isOther) { want.carrier = c; src.carrier = 'a message naming the insurance company'; } }
@@ -436,7 +438,7 @@ const AIU_CORE = (env) => {
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.3.3';
+  const VERSION = '1.3.4';
   // v1.1.0: maxLeadsThisRun stops a run after that many leads (0 = no limit)
   const DEFAULTS = { secondsBetweenLeads: 12, maxLeadsPerHour: 120, restMinutesAfterFullPass: 30, webhookUrl: '', maxLeadsThisRun: 25 };
   const S = {
