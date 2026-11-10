@@ -1,10 +1,8 @@
 // ==UserScript==
-// @name         AccuLynx - "24", "Any", "M" and "CONF" Buttons
+// @name         AccuLynx - "24", "Any", "M", "!" and "CONF" Buttons
 // @namespace    amos-exteriors
-// @version      3.0
-// @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/acculynx-text-buttons.user.js
-// @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/acculynx-text-buttons.user.js
-// @description  Adds small red buttons: "24" and "Any" on text-message boxes; one "M" button with a menu (M1 - PER TXT., M1 - PER ATT., M2 - CONF., M3 - NO CONT.) on comment boxes; and "CONF" above the Notes box when creating a lead. One click fills in the text.
+// @version      3.3
+// @description  Adds small red buttons: "24" and "Any" on text-message boxes; one "M" button with a menu (M1 - PER TXT., M1 - PER ATT., M2 - CONF., M3 - NO CONT.) and one "!" button with a quick-notes menu (NA, NALVM, NAX2LVM, PL, PL!, RH) on comment boxes; and "CONF" above the Notes box when creating a lead. One click fills in the text.
 // @match        https://my.acculynx.com/*
 // @grant        none
 // @run-at       document-idle
@@ -17,13 +15,13 @@
 
   // ---------- Pull the pieces of the text from the page ----------
 
-  // Customer first name, from the job header (e.g. "Jane Doe" -> "Jane")
+  // Customer first name, from the job header (e.g. "Amy Walker" -> "Amy")
   function getFirstName() {
     const spans = document.querySelectorAll('.job-name span.ng-binding');
     for (const s of spans) {
       const t = s.textContent.trim();
       if (!t || t === ':' || t === '#' || s.classList.contains('ng-hide')) continue;
-      // Skip job numbers shown before the name, like "IN-12345:"
+      // Skip job numbers shown before the name, like "IN-27345:"
       if (/^[A-Za-z]{0,6}-?\d+:?$/.test(t) || /:$/.test(t)) continue;
       return t.split(/\s+/)[0];
     }
@@ -31,7 +29,7 @@
   }
 
   // Full street address from the job header, ignoring hidden pieces
-  // (e.g. "123 Main Street Springfield, IN 46000")
+  // (e.g. "3984 Hillside Drive Greenwood, IN 46143-9479")
   function getAddress() {
     const el = document.querySelector('.job-address');
     if (!el) return '';
@@ -50,7 +48,15 @@
     const id = m[1];
     if (infoCache[id]) return infoCache[id];
     try {
-      const res = await fetch('/api/jobOverview/' + id + '/GetLocationInformationWithInsurance');
+      // Give up after 8 seconds so a slow AccuLynx never leaves the button hanging
+      const ctrl = new AbortController();
+      const killer = setTimeout(() => ctrl.abort(), 8000);
+      let res;
+      try {
+        res = await fetch('/api/jobOverview/' + id + '/GetLocationInformationWithInsurance', { signal: ctrl.signal });
+      } finally {
+        clearTimeout(killer);
+      }
       if (!res.ok) return null;
       const data = await res.json();
       const job = (data && data.job) || {};
@@ -158,7 +164,7 @@
   // M3 = exactly 2 weeks (14 days) out
   function buildM3Message() {
     return (
-      'AST - Required number of calls/texts/attempts have been made. ' +
+      'Required number of calls/texts/attempts have been made. ' +
       'Pushing out to Mars 3 for a 2 week FU. \n' +
       dateFromToday(14)
     );
@@ -169,8 +175,8 @@
   function buildM1Message(kind) {
     const first =
       kind === 'txt'
-        ? 'AST - Per Text: Pushing out to Mars 1 for a 4 week FU.'
-        : 'AST - Required number of calls have been made. Pushing out to Mars 1 for a 4 week FU.';
+        ? 'Per Text: Pushing out to Mars 1 for a 4 week FU.'
+        : 'Required number of calls have been made. Pushing out to Mars 1 for a 4 week FU.';
     return first + '\n' + dateFromToday(28);
   }
 
@@ -288,12 +294,34 @@
         btnM.addEventListener('click', (e) => {
           e.preventDefault();
           e.stopPropagation();
-          openMenu(btnM, ta);
+          openMenu(btnM, ta, M_MENU_ITEMS);
         });
+
+        // One "!" button right next to the M button. Clicking it opens the quick-notes menu.
+        const btnBang = makeButton('!', 'Quick notes', '0 8px 0 0');
+        btnBang.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openMenu(btnBang, ta, BANG_MENU_ITEMS);
+        });
+
+        // Order next to the paper clip: M, then !
         clip.insertAdjacentElement('afterend', btnM);
+        btnM.insertAdjacentElement('afterend', btnBang);
       });
     });
   }
+
+  // The options in the "!" menu, in order. Each one types its text into the comment box.
+  // (The name on the button is on the left, the text it enters is on the right.)
+  const BANG_MENU_ITEMS = [
+    ['NA', 'NA'],
+    ['NALVM', 'NA LVM'],
+    ['NAX2LVM', 'NAX2 LVM'],
+    ['PL', 'NAX2 (Pipeline Work)'],
+    ['PL!', 'NAX2 (Pipeline Work) Required number of calls have been made. Pushing out to Mars 1 for a 1 month FU.'],
+    ['RH', 'NA Rehash'],
+  ].map(([label, text]) => [label, (ta) => fillTextarea(ta, text)]);
 
   // The four options in the "M" menu, in order. Each one fills the comment box.
   const M_MENU_ITEMS = [
@@ -337,7 +365,7 @@
       });
   }
 
-  // ---------- The little menu that opens under M1 (PER TXT. / PER ATT.) ----------
+  // ---------- The little menu that opens under the "M" and "!" buttons ----------
 
   let mMenu = null;
 
@@ -349,8 +377,8 @@
     }
   }
 
-  function openMenu(anchor, ta) {
-    // Clicking M again while the menu is open just closes it
+  function openMenu(anchor, ta, items) {
+    // Clicking the same button again while its menu is open just closes it
     if (mMenu && mMenu._anchor === anchor) {
       closeMenu();
       return;
@@ -375,7 +403,7 @@
       'gap:4px',
     ].join(';');
 
-    M_MENU_ITEMS.forEach(([label, action]) => {
+    items.forEach(([label, action]) => {
       const opt = document.createElement('button');
       opt.type = 'button';
       opt.textContent = label;
@@ -421,7 +449,11 @@
   document.addEventListener(
     'mousedown',
     (e) => {
-      if (mMenu && !mMenu.contains(e.target) && !(e.target.closest && e.target.closest('[' + BTN_ATTR + '="M"]'))) {
+      if (
+        mMenu &&
+        !mMenu.contains(e.target) &&
+        !(e.target.closest && e.target.closest('[' + BTN_ATTR + '="M"],[' + BTN_ATTR + '="!"]'))
+      ) {
         closeMenu();
       }
     },

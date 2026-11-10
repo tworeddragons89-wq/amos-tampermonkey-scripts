@@ -2,8 +2,6 @@
 // @name         AccuLynx - Quick Click Calendars
 // @namespace    amos-exteriors
 // @version      1.0
-// @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/quick-click-calendars.user.js
-// @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/quick-click-calendars.user.js
 // @description  Adds a "Quick Click" dropdown to the AccuLynx calendar page. One click opens only the calendars you need (VERIFY, RUNS, SALES or FINALS) and closes all the others.
 // @match        https://my.acculynx.com/*
 // @grant        none
