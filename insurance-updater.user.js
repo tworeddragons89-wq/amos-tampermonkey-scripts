@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Insurance Updater (AccuLynx)
 // @namespace    amos-exteriors
-// @version      1.3.0
+// @version      1.3.1
 // @description  Fills blank Insurance and Adjuster fields on Inspection/Insurance leads from the carrier's scope, and lists everything it can't decide for a person to review.
 // @match        https://my.acculynx.com/*
 // @grant        GM_xmlhttpRequest
@@ -268,7 +268,7 @@ const AIU_CORE = (env) => {
   function parseScope(text) {
     const t = String(text || ''); const lines = t.split('\n').map((l) => l.trim());
     const r = { readable: t.replace(/\s/g, '').length >= 300, flags: [] };
-    let m = null; for (const c of t.matchAll(/Claim\s*(?:Number|No\.?|#)\s*:?\s*([A-Z0-9][A-Z0-9-]{4,24})\b/gi)) { if (/^(policy|date|type)/i.test(c[1]) || /^[0X-]+$/i.test(c[1])) continue; r.claim = c[1].toUpperCase(); break; }
+    let m = null; for (const c of t.matchAll(/Claim\s*(?:Number|No\.?|#)\s*:?\s*([A-Z0-9][A-Z0-9-]{4,24})\b/gi)) { if (/^(policy|date|type)/i.test(c[1]) || /^[0X-]+$/i.test(c[1]) || !/\d/.test(c[1])) continue; /* v1.3.1: a claim number has a digit; "INSURED" is a column label */ r.claim = c[1].toUpperCase(); break; }
     m = t.match(/Date\s+of\s+Loss\s*:?\s*(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})/i) || t.match(/Loss\s+Date\s*:?\s*(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})/i);
     if (m) { let y = +m[3]; if (y < 100) y += 2000; r.dol = { y, m: +m[1], d: +m[2] }; }
     m = t.match(/Type\s+of\s+Loss\s*:?\s*([A-Za-z][A-Za-z\/& -]{1,30}?)(?:\s{2,}|\n|$|\s+(?:Deductible|Date|Policy|Claim))/i); if (m) r.lossType = m[1].trim();
@@ -436,7 +436,7 @@ const AIU_CORE = (env) => {
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   // v1.1.0: maxLeadsThisRun stops a run after that many leads (0 = no limit)
   const DEFAULTS = { secondsBetweenLeads: 12, maxLeadsPerHour: 120, restMinutesAfterFullPass: 30, webhookUrl: '', maxLeadsThisRun: 25 };
   const S = {
