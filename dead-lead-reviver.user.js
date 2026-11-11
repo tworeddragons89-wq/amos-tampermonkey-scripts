@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.3.0
+// @version      1.3.1
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   const BATCH_SIZE = 25;                    // the run pauses itself after this many revived leads so you can review
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
@@ -53,7 +53,11 @@
   }
   let S;
   try { S = Object.assign(freshState(), JSON.parse(GM_getValue(KEY, '{}') || '{}')); } catch (e) { S = freshState(); }
-  if (S.batchVer !== 3) { S.batchVer = 3; S.maxRevive = BATCH_SIZE; }
+  if (S.batchVer !== 4) {
+    S.batchVer = 4; S.maxRevive = BATCH_SIZE;
+    // v1.3.0 had a bug that skipped leads as "Duplicate" because it read its own log panel: forget those so they get re-checked
+    for (const k of Object.keys(S.processed || {})) { if (/^skip: dead reason/.test(S.processed[k])) delete S.processed[k]; }
+  }
   const save = () => { if (S.running && S.owner && S.owner !== TAB) return; try { GM_setValue(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } };
 
   function log(msg, level) {
@@ -100,7 +104,13 @@
     return null;
   }
   const visible = e => e && e.offsetParent !== null;
-  const bodyText = () => document.body.innerText || '';
+  const bodyText = () => {      // page text WITHOUT this script's own panel (its log lines contain words like "Duplicate")
+    const p = (typeof panel !== 'undefined') ? panel : null; let old = null;
+    if (p) { old = p.style.display; p.style.display = 'none'; }
+    const t = document.body.innerText || '';
+    if (p) p.style.display = old || '';
+    return t;
+  };
   const jobIdFromPath = () => { const m = location.pathname.match(/^\/jobs\/([0-9a-f-]{36})/i); return m ? m[1] : null; };
   const isOverviewPath = () => /^\/jobs\/[0-9a-f-]{36}\/?$/i.test(location.pathname);
   const isSettingsPath = () => /^\/jobs\/[0-9a-f-]{36}\/settings/i.test(location.pathname);
@@ -180,9 +190,11 @@
       // all visible cards done -> load more
       if (cards.length === lastCount) stagnant++; else stagnant = 0;
       lastCount = cards.length;
-      if (stagnant >= 6) return stopRun('Reached the end of the Dead list. Nothing left to check.');
+      if (stagnant >= 20 && !document.querySelector('.loading-more-results')) return stopRun('Reached the end of the Dead list. Nothing left to check.');
+      if (stagnant >= 20) stagnant = 12;      // still loading - keep waiting
+      window.scrollBy(0, -400); await sleep(150);
       window.scrollTo(0, document.documentElement.scrollHeight);
-      await sleep(1200);
+      await sleep(1500);
     }
   }
 
