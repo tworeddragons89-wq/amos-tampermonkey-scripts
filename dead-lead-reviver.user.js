@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.1.2
+// @version      1.1.3
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.1.1';
+  const VERSION = '1.1.3';
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
   const DEFAULT_START_MIN = 6 * 60;         // used only when the lead had NO initial appointment: 6:00 AM
@@ -33,6 +33,9 @@
 
   const KEY = 'amosDeadLeadReviver_v1';
   const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  // Each browser tab gets its own id. Only the tab where you pressed Start runs the job; every other tab stays hands-off.
+  let TAB = null;
+  try { TAB = sessionStorage.getItem('dlrTab'); if (!TAB) { TAB = Math.random().toString(36).slice(2); sessionStorage.setItem('dlrTab', TAB); } } catch (e) { TAB = 'x' + Math.random(); }
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const jitter = (a, b) => sleep(a + Math.random() * (b - a));
 
@@ -47,7 +50,7 @@
   }
   let S;
   try { S = Object.assign(freshState(), JSON.parse(GM_getValue(KEY, '{}') || '{}')); } catch (e) { S = freshState(); }
-  const save = () => { try { GM_setValue(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } };
+  const save = () => { if (S.running && S.owner && S.owner !== TAB) return; try { GM_setValue(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } };
 
   function log(msg, level) {
     const line = { t: new Date().toISOString(), level: level || 'info', msg: String(msg) };
@@ -57,7 +60,7 @@
     console.log('[DeadLeadReviver]', msg);
   }
   function stopRun(why) {
-    S.running = false; S.phase = 'idle'; S.current = null; save();
+    S.running = false; S.owner = null; S.phase = 'idle'; S.current = null; save();
     log('STOPPED: ' + why, 'warn'); renderPanel();
   }
 
@@ -265,7 +268,7 @@
         await sleep(400);
         const dayEl = [...cal.querySelectorAll('.flatpickr-day')].find(x => x.getAttribute('aria-label') === label);
         if (!dayEl) continue;
-        ['mousedown', 'mouseup', 'click'].forEach(t => dayEl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
+        ['mousedown', 'mouseup', 'click'].forEach(t => dayEl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true })));
         await sleep(800);
       }
       if (!dateInput.value || dateInput.value.indexOf(String(T.y)) < 0) throw new Error('Date did not take (field shows "' + dateInput.value + '")');
@@ -391,9 +394,9 @@
 
   /* ---------- router ---------- */
   async function tick() {
-    if (!S.running) return;
+    if (!S.running || (S.owner && S.owner !== TAB)) return;
     await sleep(1500);
-    if (!S.running) return;
+    if (!S.running || (S.owner && S.owner !== TAB)) return;
     try {
       if (S.phase === 'list' || S.phase === 'idle') {
         if (isListPath()) return doList();
@@ -422,7 +425,7 @@
     if (!panel) return;
     const st = S.stats;
     panel.innerHTML = '';
-    const head = el('div', 'background:#1f3b63;color:#fff;padding:6px 8px;cursor:move;border-radius:7px 7px 0 0;font-weight:bold;display:flex;justify-content:space-between;', 'Dead Lead Reviver v' + VERSION + '<span>' + (S.running ? '&#9679; RUNNING' : '&#9632; stopped') + '</span>');
+    const head = el('div', 'background:#1f3b63;color:#fff;padding:6px 8px;cursor:move;border-radius:7px 7px 0 0;font-weight:bold;display:flex;justify-content:space-between;', 'Dead Lead Reviver v' + VERSION + '<span>' + (S.running ? (S.owner && S.owner !== TAB ? '&#9679; running in another tab' : '&#9679; RUNNING') : '&#9632; stopped') + '</span>');
     panel.appendChild(head);
     head.onmousedown = e => {
       const dx = e.clientX - panel.offsetLeft, dy = e.clientY - panel.offsetTop;
@@ -439,7 +442,7 @@
     const mk = (txt, bg, fn) => { const b = el('button', 'flex:1;padding:6px;border:0;border-radius:4px;color:#fff;cursor:pointer;background:' + bg, txt); b.onclick = fn; return b; };
     btns.appendChild(mk('Start', '#0a7a2f', () => {
       const v = parseInt(document.getElementById('dlr-max').value, 10);
-      S.maxRevive = v > 0 ? v : 1; S.runRevived = 0; S.running = true; S.phase = 'list'; S.current = null; save(); log('Started. Will stop after ' + S.maxRevive + ' revived lead(s).');
+      S.maxRevive = v > 0 ? v : 1; S.runRevived = 0; S.running = true; S.owner = TAB; S.phase = 'list'; S.current = null; save(); log('Started. Will stop after ' + S.maxRevive + ' revived lead(s).');
       if (isListPath()) tick(); else location.href = LIST_URL;
     }));
     btns.appendChild(mk('Stop', '#b00020', () => { stopRun('You pressed Stop.'); }));
