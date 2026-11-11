@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.6.9
+// @version      5.7.3
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply entering/entered.
@@ -37,7 +37,9 @@
     replyEntering: 'entering',
     replyEntered: 'entered',
     signatureComment: 'Claude',
-    notifyUsers: ['Mars 1 (Resets)', 'Mars 2 (Confo)'],      // @Me tags on every lead entered
+    notifyUsers: [],                                          // no @Me tags any more – a TASK for Mars 1 is created instead
+    taskTitle: 'Claude Automated Lead',                       // task created on every entered lead …
+    taskAssignee: 'Mars 1 (Resets)',                          // … assigned to Mars 1 only
 
     assignTo: 'Needs Confirmed',
     workType: 'Retail',
@@ -115,7 +117,7 @@
       if (/^[A-Za-z'.-]+$/.test(left.trim()) && /^[A-Za-z'.-]+(\s+[A-Za-z'.-]+)+$/.test(right) && !/^(mrs?|son|daughter|wife|husband)\b/i.test(right)) nmRaw = left.trim() + ' and ' + right;
       else { nameExtra = right; nmRaw = left; }
     }   // "Susana Bargis / Abraham (son)"
-    { const sw = nmRaw.match(/\s+(spoke|spoken|talked|talk|met)\s+(with|to)\b.*$/i);                    // "Sarah and Sean Jones spoke with Sara"
+    { const sw = nmRaw.match(/\s+(spoke|spoken|talked|talk|met)\s+(with|to)\b.*$/i);                    // "Pat and Lee Smith spoke with Sam"
       if (sw) { nameExtra = (nameExtra ? nameExtra + ' ' : '') + sw[0].trim().replace(/^./, c => c.toUpperCase()) + '.'; nmRaw = nmRaw.slice(0, sw.index); } }
     nmRaw = nmRaw.replace(/\([^)]*\)/g, ' ');                                                                     // drop "(son)", "(wife)"...
     const nm = nmRaw.replace(/\s+@\s+/g, ' and ').replace(/\s*[,&+]\s*/g, ' and ').replace(/\s+/g, ' ').trim();
@@ -137,6 +139,7 @@
     const zipLine = (lines[streetLine + 2] || '').trim();                     // the rep put the zip on a line of its own
     if (!/\b\d{5}\b/.test(addr.replace(/^\s*\d+/, '')) && /^\d{5}(-\d{4})?$/.test(zipLine)) addr += ' ' + zipLine;
     addr = addr.replace(/\b(?:cty|co|cnty)\.?\s*r(?:oa)?d\.?(?=\s*\d)/i, 'County Road');   // "123 N Cty Rd 500 E"
+    addr = addr.replace(/([A-Za-z])\.(?=\s*,?\s*(?:IN\b\.?\s*)?\d{5}\b)/g, '$1');                  // "Anderson. 46013" → "Anderson 46013"
     lead.address = addr.replace(/\bindiana\b/i, 'IN').replace(/\s+/g, ' ');
     const zipAll = [...lead.address.matchAll(/\b(4\d{4})\b/g)].filter(m => m.index > 0); lead.zip = zipAll.length ? zipAll[zipAll.length - 1][1] : '';
     const email = text.match(/[A-Za-z0-9._%+-]*[A-Za-z][A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/); lead.email = email ? email[0] : '';
@@ -146,17 +149,22 @@
     lead.phoneLabel = phoneLabel(lines[phoneLine]);
     lead.phones2 = [];
     lines.forEach((l, i) => {
-      if (i === phoneLine || i === streetLine || l === nameLine || (fixLine && l === fixLine) || (i === streetLine + 1 && addr.includes(l))) return;
+      if (i === phoneLine || i === streetLine || l === nameLine || (fixLine && l === fixLine) || (i === streetLine + 1 && addr.replace(/\./g, '').includes(l.replace(/\./g, '')))) return;
       if (/^\d{5}(-\d{4})?$/.test(l)) return;                                      // a bare zip line – already part of the address
       if (/^@?\s*\d{1,2}(:\d{2})?\s*(am?|pm?|a\.m\.|p\.m\.)\.?$/i.test(l)) return;      // a bare time line ("3pm") – already in the appointment
       if (phoneRe.test(l) && l.replace(phoneRe, '').trim().length < 30) {             // second phone number → contact + Mr/Mrs line, not Concerns
         lead.phones2.push({ num: l.match(phoneRe)[1].replace(/\D/g, ''), label: phoneLabel(l) }); return;
       }
       if (/^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/.test(l)) return;                               // email line → Email field only
-      if ((/\d{1,2}\/\d{1,2}/.test(l) || /(?<![\d-])\d{1,2}-\d{1,2}(?![\d-])/.test(l)) && l.length < 40) return;
+      if ((/\d{1,2}\/\d{1,2}/.test(l) || /(?<![\d-])\d{1,2}-\d{1,2}(?![\d-])/.test(l) || /(?<![\d-])\d{1,2}-\d{1,2}-\d{2,4}(?!\d)/.test(l)) && l.length < 40) return;
       if (/^[a-z]{1,3}\d{0,2}$/i.test(l)) return;                                   // rep codes like "Zl1"
       if (new RegExp('^(' + MONTHS.map(m => m.slice(0, 3)).join('|') + ')[a-z]*\\.?\\s+\\d', 'i').test(l) && l.length < 40) return;
-      if (PRODUCT_RE.test(l) && l.length < 60) { lead.products.push(l.replace(/^\d{1,4}(:\d{2})?\s*(am|pm|a|p)?\s+/i, '')); return; }   // "130 sofit" → "sofit"
+      if (PRODUCT_RE.test(l) && l.length < 60) {                                    // "130 sofit" → "sofit";  "Soffit/fascia Est" → "Soffit / Fascia"
+        const clean = l.replace(/^\d{1,4}(:\d{2})?\s*(am|pm|a|p)?\s+/i, '').replace(/\b(?:est(?:imates?)?|quotes?|inspections?)\b\.?/ig, ' ').replace(/\s+/g, ' ').trim();
+        const parts = clean.split(/\s*(?:\/|,|\+|&|\band\b)\s*/i).map(x => x.trim()).filter(Boolean);
+        lead.products.push(parts.length > 1 && parts.every(x => x.length < 25) ? parts.map(titleCase).join(' / ') : (clean || l)); return; }
+      const em = l.match(/[A-Za-z0-9._%+-]*[A-Za-z][A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/);
+      if (em) { l = l.replace(em[0], '').replace(/^[\s.,;:\-]+/, '').trim(); if (!l) return; }      // email goes in the Email field only
       lead.extra.push(l);
     });
     // "Pat Lee/Mrs." → the wife is on the lead (Mrs line), not a note in Concerns
@@ -202,8 +210,8 @@
     namePart = namePart.replace(/(\S+)\s+([a-z](?: [a-z]){2,})\b/gi, (all, word, letters) => titleCase(letters.replace(/ /g, '')))
                        .replace(/\b[a-z](?: [a-z]){2,}\b/gi, '')                // any leftover spelled letters
                        .replace(/\s*(,|&|\+|\band\b)\s*/gi, ' and ').replace(/\s+/g, ' ').trim();
-    namePart = namePart.replace(/\s+(?:they|she|he|we)?\s*(?:live|lives|living|reside|resides)(?:\s+at)?$/i, '').replace(/\s+(?:address\s+is|located\s+at|at)$/i, '').trim();   // "… Warden they live at"
-    namePart = namePart.replace(/^(\S+)\s+(\S+)\s+and\s+(\S+)\s+\2$/i, '$1 and $3 $2');       // "Corey Warden and Amanda Warden" → "Corey and Amanda Warden"
+    namePart = namePart.replace(/\s+(?:they|she|he|we)?\s*(?:live|lives|living|reside|resides)(?:\s+at)?$/i, '').replace(/\s+(?:address\s+is|located\s+at|at)$/i, '').trim();   // "… Smith they live at"
+    namePart = namePart.replace(/^(\S+)\s+(\S+)\s+and\s+(\S+)\s+\2$/i, '$1 and $3 $2');       // "Pat Smith and Lee Smith" → "Pat and Lee Smith"
     const parts = namePart.split(' ').filter(Boolean);
     lead.first = parts.length > 1 ? titleCase(parts.slice(0, -1).join(' ')) : (parts[0] ? titleCase(parts[0]) : CONFIG.defaults.first);
     lead.last = parts.length ? titleCase(parts[parts.length - 1]) : CONFIG.defaults.last;
@@ -291,12 +299,15 @@
   }
   function parseAppt(text) {
     const d = text.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/) ||
+              text.match(/(?<![\d-])(1[0-2]|0?[1-9])-([12]\d|3[01]|0?[1-9])-(\d{2,4})(?!\d)/) ||     // "11-17-26"
               text.match(/(?<![\d-])(1[0-2]|0?[1-9])-([12]\d|3[01]|0?[1-9])(?![\d-])()/);   // "11-7"
     if (!d) return null;
     const now = new Date();
-    const year = d[3] ? (+d[3] < 100 ? 2000 + +d[3] : +d[3]) : now.getFullYear();
+    let yr = d[3] ? (+d[3] < 100 ? 2000 + +d[3] : +d[3]) : 0;
+    if (yr && yr < now.getFullYear()) yr = 0;                      // a typo like "11-4-16" is not 2016 – use the next such date
+    const year = yr || now.getFullYear();
     const date = new Date(year, +d[1] - 1, +d[2]);
-    if (!d[3] && date < new Date(now.getFullYear(), now.getMonth(), now.getDate())) date.setFullYear(year + 1);
+    if (!yr && date < new Date(now.getFullYear(), now.getMonth(), now.getDate())) date.setFullYear(year + 1);
     const t = text.match(/(?:@|\bat\b)\s*(\d{1,4})(?::(\d{2}))?\s*(am|pm|a|p)?/i) ||
               text.match(/\b(\d{1,4})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)(?![a-z])/i);      // "330 pm" with no @
     if (!t) {
@@ -511,6 +522,7 @@
     log('Lead: ' + lead.first + ' ' + lead.last + ' (' + repName + ')');
     await gmSend(CONFIG.replyEntering);
     // lead sheet photo from the same rep, posted just before or after
+    const minOf = m => { const x = ((m.innerText || '').match(/(\d{1,2}):(\d{2})\s*([AP])M/i) || []); return x[1] ? ((+x[1] % 12) + (/p/i.test(x[3]) ? 12 : 0)) * 60 + +x[2] : null; };   // message time in minutes
     const msgs = gmMessages(), i = msgs.indexOf(node), sender = gmSender(node);
     lead.imageUrl = gmImage(node);                 // photo in the same message, if any
     // the rep's photo nearest to the lead text: look both ways (other people's replies are skipped),
@@ -519,7 +531,7 @@
       let fwd = null, back = null;
       for (let j = i + 1, n = 0; j < Math.min(msgs.length, i + 6); j++) {
         if (gmSender(msgs[j]) !== sender) continue; n++;
-        const im = gmImage(msgs[j]); if (im) { fwd = { url: im, d: n }; break; }
+        const im = gmImage(msgs[j]); if (im) { fwd = { url: im, d: n, t: minOf(msgs[j]) }; break; }
         if (gmText(msgs[j])) break;
       }
       for (let j = i - 1, n = 0; j >= Math.max(0, i - 6); j--) {
@@ -540,11 +552,14 @@
             }
             break;
           }
-          if (!prevIsLead) back = { url: im, d: n };
+          if (!prevIsLead) back = { url: im, d: n, t: minOf(msgs[j]) };
           break;
         }
       }
-      const pick = (fwd && (!back || fwd.d < back.d)) ? fwd : back;
+      // when both exist, the one posted CLOSER IN TIME wins (a text posted 4:41 and a photo posted 4:41 beat a photo from 4:16)
+      const t0 = minOf(node);
+      let pick = (fwd && (!back || fwd.d < back.d)) ? fwd : back;
+      if (fwd && back && t0 != null && fwd.t != null && back.t != null) pick = Math.abs(fwd.t - t0) < Math.abs(back.t - t0) ? fwd : back;
       lead.imageUrl = pick ? pick.url : '';
     }
     if (!lead.imageUrl) {
@@ -560,7 +575,7 @@
     }
     lead.id = 'L' + node.getAttribute('data-message-id'); lead.chatId = currentChatId();
     // a re-click is a fresh run: forget anything left from the last attempt on this message
-    ['amos_filled_', 'amos_step_', 'amos_comments_done_', 'amos_done_', 'amos_problems_'].forEach(k => GM_deleteValue(k + lead.id));
+    ['amos_filled_', 'amos_step_', 'amos_comments_done_', 'amos_task_done_', 'amos_done_', 'amos_problems_'].forEach(k => GM_deleteValue(k + lead.id));
     if (GM_getValue(KEY_ACTIVE) === lead.id) GM_deleteValue(KEY_ACTIVE);
     if (lead.appt) lead.appt.date = lead.appt.date.toISOString();
     lead.queuedAt = Date.now(); const q = GM_getValue(KEY_QUEUE, {}); q[lead.id] = lead; GM_setValue(KEY_QUEUE, q);
@@ -863,6 +878,51 @@
     const ok = await waitFor(() => /submitted successfully/i.test(document.body.innerText) || (ed.ckeditorInstance && ed.ckeditorInstance.getData() === '' && document.body.innerText.length > before), 15000);
     if (!ok) throw new Error('reply did not post');
     await sleep(1500);
+  }
+
+
+  /* ---------- Task for Mars 1 (replaces the @Me tag): Overview → Tasks → Create Task ---------- */
+  async function createTask(title, assignee) {
+    const txt = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+    const openBtn = await waitFor(() => [...document.querySelectorAll('button,a,span,div')].find(e => visible(e) && e.children.length < 3 && /^\+?\s*Create Task$/i.test(txt(e))), 20000);
+    if (!openBtn) throw new Error('"Create Task" button not found on the Overview page');
+    openBtn.scrollIntoView({ block: 'center' }); openBtn.click(); await sleep(1500);
+    // the task window: the smallest visible container that has a text box and a Save/Create button
+    const dlg = () => [...document.querySelectorAll('[role=dialog],.modal,.ax-modal,.ax-drawer,[class*="drawer"],[class*="modal"],[class*="slideout"]')].filter(visible)
+      .filter(d => d.querySelector('input,textarea') && /task/i.test(txt(d))).sort((a, b) => txt(a).length - txt(b).length)[0];
+    const win = await waitFor(dlg, 15000);
+    if (!win) throw new Error('task window did not open');
+    // title
+    const boxes = [...win.querySelectorAll('input[type=text],input:not([type]),textarea')].filter(visible);
+    const labelOf = i => ((i.getAttribute('placeholder') || '') + ' ' + (i.getAttribute('aria-label') || '') + ' ' + ((i.closest('div') || {}).innerText || '').slice(0, 60));
+    const titleBox = boxes.find(i => /title|name|subject|task/i.test(labelOf(i))) || boxes[0];
+    if (!titleBox) throw new Error('task title box not found');
+    titleBox.focus(); setValue(titleBox, title); titleBox.dispatchEvent(new Event('blur', { bubbles: true })); await sleep(500);
+    // assigned to: a real <select>, or AccuLynx's custom dropdown
+    const first = assignee.split(' ')[0] + ' ' + assignee.split(' ')[1];
+    const sel = [...win.querySelectorAll('select')].find(x => [...x.options].some(o => o.text.includes(assignee) || o.text.startsWith(first)));
+    if (sel) {
+      const o = [...sel.options].find(o => o.text.includes(assignee)) || [...sel.options].find(o => o.text.startsWith(first));
+      sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true })); sel.dispatchEvent(new Event('input', { bubbles: true }));
+    } else {
+      const lab = [...win.querySelectorAll('label,div,span')].find(e => visible(e) && e.children.length < 3 && /^(assigned to|assign to|assignee|assigned user)\b/i.test(txt(e)));
+      let ctl = lab && (lab.nextElementSibling || (lab.parentElement && lab.parentElement.querySelector('[class*="select"],[class*="dropdown"],input')));
+      if (!ctl) ctl = [...win.querySelectorAll('[class*="select"],[class*="dropdown"]')].filter(visible)[0];
+      if (!ctl) throw new Error('"Assigned to" control not found');
+      ctl.click(); await sleep(800);
+      const typed = ctl.querySelector('input') || document.activeElement;
+      if (typed && typed.tagName === 'INPUT') { setValue(typed, assignee.split(' ')[0] + ' ' + assignee.split(' ')[1]); await sleep(900); }
+      const opt = await waitFor(() => [...document.querySelectorAll('li,div,span,label,a,[role=option]')].find(e => visible(e) && e.children.length < 3 && txt(e) === assignee) ||
+                                      [...document.querySelectorAll('li,div,span,label,a,[role=option]')].find(e => visible(e) && e.children.length < 3 && txt(e).startsWith(first)), 8000);
+      if (!opt) throw new Error('"' + assignee + '" not in the Assigned-to list');
+      opt.click(); await sleep(600);
+    }
+    const save = [...win.querySelectorAll('button')].filter(visible).find(b => /^(save|create|create task|add task|add)$/i.test(txt(b)) && !b.disabled);
+    if (!save) throw new Error('task Save button not found');
+    save.click();
+    const ok = await waitFor(() => /task (was )?(created|saved|added)|created successfully|saved successfully|submitted successfully/i.test(document.body.innerText) || !dlg(), 15000);
+    if (!ok) throw new Error('task was not confirmed');
+    await sleep(1200);
   }
 
   /* ---------- @Me tag: Messages tab → comment + "Send notification to" Mars 1 & Mars 2 ---------- */
@@ -1225,9 +1285,20 @@
         await replyInThread(lead.raw);
       if (!threadText().includes((srcLine + ' Initial Appt: ' + lead.apptText).replace(/\s+/g, ' ')))
         await replyInThread(srcLine + '\nInitial Appt: ' + lead.apptText);
-      await replyInThread(CONFIG.signatureComment, CONFIG.notifyUsers);   // "Claude" + @Me Mars 1 & Mars 2
+      await replyInThread(CONFIG.signatureComment, CONFIG.notifyUsers);   // "Claude" (no @Me tags any more)
       GM_setValue('amos_comments_done_' + lead.id, true);
-      log('Replies posted and Mars 1 & 2 tagged');
+      log('Replies posted');
+      return go('', 'task');                                              // Overview page → create the task for Mars 1
+    }
+    if (step === 'task') {
+      if (GM_getValue('amos_task_done_' + lead.id)) { GM_setValue(stepKey, 'tag'); return finishJob(lead, jobId); }   // never twice
+      GM_setValue('amos_task_done_' + lead.id, true);                     // ONE attempt only – a half-finished try must not create a second task
+      await sleep(2500);
+      try { await createTask(CONFIG.taskTitle, CONFIG.taskAssignee); log('Task "' + CONFIG.taskTitle + '" created for ' + CONFIG.taskAssignee); }
+      catch (e) {
+        const pr = GM_getValue('amos_problems_' + lead.id, []); pr.push('Task NOT created (' + e.message + ') – create "' + CONFIG.taskTitle + '" for ' + CONFIG.taskAssignee + ' by hand'); GM_setValue('amos_problems_' + lead.id, pr);
+        log('Task: ' + e.message, true);
+      }
       GM_setValue(stepKey, 'tag');
       return finishJob(lead, jobId);
     }
@@ -1235,7 +1306,7 @@
       GM_setValue('amos_post_entered', [...GM_getValue('amos_post_entered', []), { id: lead.id, chatId: lead.chatId, name: lead.first + ' ' + lead.last }]);
       GM_setValue('amos_done_' + lead.id, true);
       const q = GM_getValue(KEY_QUEUE, {}); delete q[lead.id]; GM_setValue(KEY_QUEUE, q);
-      GM_deleteValue(KEY_ACTIVE); GM_deleteValue(stepKey); GM_deleteValue('amos_comments_done_' + lead.id);
+      GM_deleteValue(KEY_ACTIVE); GM_deleteValue(stepKey); GM_deleteValue('amos_comments_done_' + lead.id); GM_deleteValue('amos_task_done_' + lead.id);
       const probs = GM_getValue('amos_problems_' + lead.id, []); GM_deleteValue('amos_problems_' + lead.id);
       showNote('Done – ' + lead.first + ' ' + lead.last + ' entered.' + (probs.length ? ' NOTE: ' + probs.join(' · ') : ' You can close this tab.'), probs.length > 0);
     }
