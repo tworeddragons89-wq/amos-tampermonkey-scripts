@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.1.3
+// @version      1.2.0
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,8 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.1.3';
+  const VERSION = '1.2.0';
+  const BATCH_SIZE = 1000;                  // the run pauses itself after this many revived leads so you can review
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
   const DEFAULT_START_MIN = 6 * 60;         // used only when the lead had NO initial appointment: 6:00 AM
@@ -45,11 +46,12 @@
       running: false, phase: 'idle', current: null,
       processed: {},                       // id -> short outcome
       stats: { scanned: 0, revived: 0, skipped: 0, tooNew: 0, errors: 0 },
-      log: [], maxRevive: 1, runRevived: 0, pos: null
+      log: [], maxRevive: BATCH_SIZE, runRevived: 0, pos: null
     };
   }
   let S;
   try { S = Object.assign(freshState(), JSON.parse(GM_getValue(KEY, '{}') || '{}')); } catch (e) { S = freshState(); }
+  if (S.batchVer !== 2) { S.batchVer = 2; S.maxRevive = BATCH_SIZE; }
   const save = () => { if (S.running && S.owner && S.owner !== TAB) return; try { GM_setValue(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } };
 
   function log(msg, level) {
@@ -58,6 +60,10 @@
     if (S.log.length > 500) S.log = S.log.slice(-500);
     save(); renderPanel();
     console.log('[DeadLeadReviver]', msg);
+  }
+  function beep() {
+    try { const c = new (window.AudioContext || window.webkitAudioContext)(); for (let i = 0; i < 3; i++) { const o = c.createOscillator(); o.connect(c.destination); o.frequency.value = 880; o.start(c.currentTime + i * 0.4); o.stop(c.currentTime + i * 0.4 + 0.25); } } catch (e) { /* ignore */ }
+    try { document.title = '\u2705 BATCH DONE - ' + document.title.replace(/^\u2705 BATCH DONE - /, ''); } catch (e) { /* ignore */ }
   }
   function stopRun(why) {
     S.running = false; S.owner = null; S.phase = 'idle'; S.current = null; save();
@@ -379,7 +385,7 @@
     if (kind === 'tooNew') S.stats.tooNew++;
     if (kind !== 'ok') log((cur ? cur.name : '?') + ': ' + outcome);
     S.current = null; S.phase = 'list'; save();
-    if (S.runRevived >= S.maxRevive) return stopRun('Reached your limit of ' + S.maxRevive + ' revived lead(s). Raise the limit and press Start to continue.');
+    if (S.runRevived >= S.maxRevive) { beep(); return stopRun('BATCH COMPLETE: revived ' + S.runRevived + ' lead(s) this run. Totals - checked ' + S.stats.scanned + ', revived ' + S.stats.revived + ', skipped ' + S.stats.skipped + ', too new ' + S.stats.tooNew + ', errors ' + S.stats.errors + '. Download the log, tell Claude, then press Start for the next ' + BATCH_SIZE + '.'); }
     await jitter(500, 1100);
     location.href = LIST_URL;
   }
@@ -442,7 +448,7 @@
     const mk = (txt, bg, fn) => { const b = el('button', 'flex:1;padding:6px;border:0;border-radius:4px;color:#fff;cursor:pointer;background:' + bg, txt); b.onclick = fn; return b; };
     btns.appendChild(mk('Start', '#0a7a2f', () => {
       const v = parseInt(document.getElementById('dlr-max').value, 10);
-      S.maxRevive = v > 0 ? v : 1; S.runRevived = 0; S.running = true; S.owner = TAB; S.phase = 'list'; S.current = null; save(); log('Started. Will stop after ' + S.maxRevive + ' revived lead(s).');
+      S.maxRevive = v > 0 ? v : BATCH_SIZE; S.runRevived = 0; S.running = true; S.owner = TAB; S.phase = 'list'; S.current = null; save(); log('Started. Will stop after ' + S.maxRevive + ' revived lead(s).');
       if (isListPath()) tick(); else location.href = LIST_URL;
     }));
     btns.appendChild(mk('Stop', '#b00020', () => { stopRun('You pressed Stop.'); }));
