@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.2.1
+// @version      1.3.0
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,8 +15,8 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.2.1';
-  const BATCH_SIZE = 1000;                  // the run pauses itself after this many revived leads so you can review
+  const VERSION = '1.3.0';
+  const BATCH_SIZE = 25;                    // the run pauses itself after this many revived leads so you can review
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
   const DEFAULT_START_MIN = 6 * 60;         // used only when the lead had NO initial appointment: 6:00 AM
@@ -30,6 +30,8 @@
     { name: 'Wrong Number',        re: /wrong\s*number/i },
     { name: 'Out of Service Area', re: /out\s*of\s*(the\s*)?(our\s*)?(service\s*)?(area|territory)|outside\s*(of\s*)?(our\s*)?(service\s*)?area/i }
   ];
+  // Wording in a lead's notes that makes it "questionable": the lead is NOT revived, it is put on the flagged list instead.
+  const QUESTIONABLE_WORDS = /\b(attorney|lawyer|lawsuit|legal action|sue[sd]?|suing|complain(?:t|ed|ing)?|harass(?:ed|ing|ment)?|threat(?:en|ened|s)?|hostile|abusive|fraud|scam|bbb|better business|restraining|cease and desist|police|cops?)\b/i;
   /* ================================================================ */
 
   const KEY = 'amosDeadLeadReviver_v1';
@@ -46,12 +48,12 @@
       running: false, phase: 'idle', current: null,
       processed: {},                       // id -> short outcome
       stats: { scanned: 0, revived: 0, skipped: 0, tooNew: 0, errors: 0 },
-      log: [], maxRevive: BATCH_SIZE, runRevived: 0, pos: null
+      log: [], flagged: [], maxRevive: BATCH_SIZE, runRevived: 0, pos: null
     };
   }
   let S;
   try { S = Object.assign(freshState(), JSON.parse(GM_getValue(KEY, '{}') || '{}')); } catch (e) { S = freshState(); }
-  if (S.batchVer !== 2) { S.batchVer = 2; S.maxRevive = BATCH_SIZE; }
+  if (S.batchVer !== 3) { S.batchVer = 3; S.maxRevive = BATCH_SIZE; }
   const save = () => { if (S.running && S.owner && S.owner !== TAB) return; try { GM_setValue(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } };
 
   function log(msg, level) {
@@ -68,6 +70,23 @@
   function stopRun(why) {
     S.running = false; S.stopAfter = false; S.owner = null; S.phase = 'idle'; S.current = null; save();
     log('STOPPED: ' + why, 'warn'); renderPanel();
+  }
+
+  /* ---------- flagged (questionable) leads ---------- */
+  function addFlag(category, why) {
+    const cur = S.current; if (!cur) return;
+    S.flagged = (S.flagged || []).filter(f => f.id !== cur.id);
+    const num = ((cur.name || '').match(/^\s*(\d+-\d+)/) || [])[1] || '';
+    S.flagged.push({ when: new Date().toISOString().slice(0, 19).replace('T', ' '), jobNumber: num, name: cur.name || '', id: cur.id, link: 'https://my.acculynx.com/jobs/' + cur.id, category, why: String(why).slice(0, 300) });
+    save();
+  }
+  function flagLead(category, why) {
+    addFlag(category, why);
+    return finishLead('FLAGGED (' + category + '): ' + why, 'skipped');
+  }
+  function flaggedCsv() {
+    const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    return ['Date,Job number,Name,Category,Why flagged,Link'].concat((S.flagged || []).map(f => [f.when, f.jobNumber, f.name, f.category, f.why, f.link].map(q).join(','))).join('\n');
   }
 
   /* ---------- helpers ---------- */
@@ -177,15 +196,20 @@
     cur.name = ov.name || cur.name;
 
     if (!ov.dead) return finishLead('skip: not dead', 'skipped');
-    if (ov.appt.bad) return finishLead('skip: could not read initial appt "' + ov.appt.raw + '"', 'skipped');
+    if (ov.appt.bad) return flagLead('Missing/unreadable date', 'could not read the initial appt "' + ov.appt.raw + '"');
 
     const anchor = ov.appt.has ? ov.appt : ov.lead;
     const source = ov.appt.has ? 'initial appt' : 'created date';
-    if (!anchor) return finishLead('skip: no initial appt and no created date found', 'skipped');
+    if (!anchor) return flagLead('Missing/unreadable date', 'no initial appt and no created date found');
     const anchorDate = new Date(anchor.y, anchor.m0, anchor.d);
     if (anchorDate > cutoffDate()) {
       return finishLead('too new (' + source + ' ' + (anchor.m0 + 1) + '/' + anchor.d + '/' + anchor.y + ')', 'tooNew');
     }
+
+    // ---- real history (invoices / orders) => questionable, do not touch ----
+    const bt = bodyText();
+    const inv = +((bt.match(/Invoices\s*\n?\s*(\d+)/) || [])[1] || 0), ord = +((bt.match(/Orders\s*\n?\s*(\d+)/) || [])[1] || 0);
+    if (inv > 0 || ord > 0) return flagLead('Has real history', inv + ' invoice(s), ' + ord + ' order(s) on the job');
 
     // ---- check the dead reason in the Messages tab ----
     const tab = [...document.querySelectorAll('a,li,span,div')].find(e => visible(e) && e.children.length <= 2 &&
@@ -200,6 +224,8 @@
       more.click(); await sleep(1500);
     }
     const why = dueToReason(bodyText());
+    const qw = bodyText().match(QUESTIONABLE_WORDS);
+    if (qw && !why.excluded) return flagLead('Questionable notes', 'notes mention "' + qw[0] + '" (dead reason: ' + why.reason + ')');
     if (why.excluded) return finishLead('skip: dead reason "' + why.excluded + '" - ' + why.reason, 'skipped');
 
     const startMin = ov.appt.has && ov.appt.startMin != null ? ov.appt.startMin : DEFAULT_START_MIN;
@@ -394,6 +420,7 @@
     const cur = S.current;
     S.stats.errors++;
     if (cur) S.processed[cur.id] = 'ERROR: ' + msg;
+    addFlag(revivedAlready ? 'Error - revived, needs hand-fix' : 'Error', msg);
     log((cur ? cur.name + ' (' + cur.id + ')' : '?') + ': ' + msg, 'error');
     stopRun('Error - check the log, fix this lead by hand if needed, then press Start to continue.');
     return null;
@@ -441,7 +468,7 @@
       document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); e.preventDefault();
     };
     const body = el('div', 'padding:8px;');
-    body.appendChild(el('div', '', 'Checked: <b>' + st.scanned + '</b> &nbsp; Revived: <b style="color:#0a7a2f">' + st.revived + '</b> &nbsp; Skipped: <b>' + st.skipped + '</b> &nbsp; Too new: <b>' + st.tooNew + '</b> &nbsp; Errors: <b style="color:#b00020">' + st.errors + '</b>'));
+    body.appendChild(el('div', '', 'Checked: <b>' + st.scanned + '</b> &nbsp; Revived: <b style="color:#0a7a2f">' + st.revived + '</b> &nbsp; Skipped: <b>' + st.skipped + '</b> &nbsp; Too new: <b>' + st.tooNew + '</b> &nbsp; Errors: <b style="color:#b00020">' + st.errors + '</b> &nbsp; Flagged: <b style="color:#9a6700">' + (S.flagged || []).length + '</b>'));
     body.appendChild(el('div', 'margin:4px 0;color:#555;', S.current ? 'Working on: ' + S.current.name + ' (' + S.phase + ')' : 'Idle'));
     const row = el('div', 'margin:6px 0;display:flex;align-items:center;gap:6px;', 'Stop after reviving <input id="dlr-max" type="number" min="1" style="width:60px;" value="' + S.maxRevive + '"> leads');
     body.appendChild(row);
@@ -459,12 +486,19 @@
     body.appendChild(btns);
     const btns2 = el('div', 'display:flex;gap:6px;margin:4px 0;');
     btns2.appendChild(mk('Download log', '#555', downloadLog));
-    btns2.appendChild(mk('Reset memory', '#888', () => { if (confirm('Forget which leads were already checked? (Does not change AccuLynx.)')) { S = Object.assign(freshState(), { pos: S.pos }); save(); renderPanel(); } }));
+    btns2.appendChild(mk('Flagged CSV', '#9a6700', downloadFlagged));
+    btns2.appendChild(mk('Reset memory', '#888', () => { if (confirm('Forget which leads were already checked? (Does not change AccuLynx.)')) { S = Object.assign(freshState(), { pos: S.pos, flagged: S.flagged || [] }); save(); renderPanel(); } }));
     body.appendChild(btns2);
     const lg = el('div', 'height:120px;overflow:auto;background:#f4f6f8;border:1px solid #ddd;padding:4px;margin-top:4px;font-size:11px;');
     lg.innerHTML = S.log.slice(-40).reverse().map(l => '<div style="color:' + (l.level === 'error' ? '#b00020' : l.level === 'ok' ? '#0a7a2f' : l.level === 'warn' ? '#9a6700' : '#222') + '">' + l.t.slice(11, 19) + ' ' + l.msg.replace(/</g, '&lt;') + '</div>').join('');
     body.appendChild(lg);
+    const fd = el('pre', 'display:none;'); fd.id = 'dlr-flagged'; fd.textContent = JSON.stringify(S.flagged || []); body.appendChild(fd);
     panel.appendChild(body);
+  }
+  function downloadFlagged() {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([flaggedCsv()], { type: 'text/csv' }));
+    a.download = 'dead-lead-reviver-flagged.csv'; a.click();
   }
   function downloadLog() {
     const rows = ['time,level,message'].concat(S.log.map(l => [l.t, l.level, '"' + l.msg.replace(/"/g, '""') + '"'].join(',')));
