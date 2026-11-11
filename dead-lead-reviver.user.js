@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.3.2
+// @version      1.3.3
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.3.2';
+  const VERSION = '1.3.3';
   const BATCH_SIZE = 25;                    // the run pauses itself after this many revived leads so you can review
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
@@ -264,7 +264,8 @@
     await sleep(500);
     S.phase = 'appt'; save();
     btn.click();
-    await sleep(4000);
+    await waitFor(() => /re-?opened successfully/i.test(bodyText()), 25000);   // wait for AccuLynx to confirm
+    await sleep(3000);
     location.href = '/jobs/' + cur.id;
   }
 
@@ -274,7 +275,11 @@
     if (!cur || !cur.info || jobIdFromPath() !== cur.id) { location.href = LIST_URL; return; }
     const ov = await waitFor(() => { const o = readOverview(); return o.ready ? o : null; }, 25000);
     if (!ov) return failLead('Overview did not load after re-open', true);
-    if (ov.dead) return failLead('Lead is STILL dead after clicking Re-Open Job', true);
+    if (ov.dead) {      // the status can lag a few seconds behind the re-open - reload and look again before giving up
+      cur.deadTries = (cur.deadTries || 0) + 1; save();
+      if (cur.deadTries <= 4) { log('Still shows dead right after re-open (check ' + cur.deadTries + '/4), waiting...', 'warn'); await sleep(8000); location.reload(); return; }
+      return failLead('Lead is STILL dead after clicking Re-Open Job', true);
+    }
     if (!cur.apptTries) { S.stats.revived++; S.runRevived++; }
     save();
     await sleep(cur.apptTries ? 3000 : 8000);   // let AccuLynx finish its own post-re-open work before we edit the appointment
