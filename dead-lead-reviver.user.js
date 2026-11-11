@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.0.0
+// @version      1.0.1
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const DEFAULT_START_MIN = 6 * 60;         // used only when the lead had NO initial appointment: 6:00 AM
   const DEFAULT_END_MIN = 7 * 60;           //                                                      7:00 AM
@@ -248,20 +248,23 @@
       if (dateInput.value) throw new Error('Could not clear the old appointment date');
 
       // 2) pick the new date in the calendar (walk month by month)
-      dateInput.focus(); dateInput.click();
-      let cal = await waitFor(() => document.querySelector('.flatpickr-calendar.open'), 3000);
-      if (!cal) { const ico = wrap.querySelector('svg,button:not(.form-v3-select__clear)'); if (ico) ico.dispatchEvent(new MouseEvent('click', { bubbles: true })); cal = await waitFor(() => document.querySelector('.flatpickr-calendar.open'), 3000); }
-      if (!cal) throw new Error('Calendar did not open');
-      const curY = parseInt(cal.querySelector('.cur-year').value, 10);
-      const curM = parseInt(cal.querySelector('select.flatpickr-monthDropdown-months').value, 10);
-      const diff = (curY * 12 + curM) - (T.y * 12 + T.m0);
-      const nav = cal.querySelector(diff > 0 ? '.flatpickr-prev-month' : '.flatpickr-next-month');
-      for (let i = 0; i < Math.abs(diff); i++) nav.click();
-      await sleep(400);
-      const dayEl = [...cal.querySelectorAll('.flatpickr-day')].find(x => x.getAttribute('aria-label') === label);
-      if (!dayEl) throw new Error('Calendar day "' + label + '" not found');
-      ['mousedown', 'mouseup', 'click'].forEach(t => dayEl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
-      await sleep(800);
+      // NOTE: the calendar does not have to be open - its day buttons still work while hidden,
+      // which is more reliable than trying to pop it open (that fails if the window is not focused).
+      const cals = [...document.querySelectorAll('.flatpickr-calendar')];
+      if (!cals.length) throw new Error('Calendar not found on page');
+      for (const cal of cals) {
+        if (dateInput.value && dateInput.value.indexOf(String(T.y)) >= 0) break;
+        const yrEl = cal.querySelector('.cur-year'), moEl = cal.querySelector('select.flatpickr-monthDropdown-months');
+        if (!yrEl || !moEl) continue;
+        const diff = (parseInt(yrEl.value, 10) * 12 + parseInt(moEl.value, 10)) - (T.y * 12 + T.m0);
+        const nav = cal.querySelector(diff > 0 ? '.flatpickr-prev-month' : '.flatpickr-next-month');
+        for (let i = 0; i < Math.abs(diff); i++) nav.click();
+        await sleep(400);
+        const dayEl = [...cal.querySelectorAll('.flatpickr-day')].find(x => x.getAttribute('aria-label') === label);
+        if (!dayEl) continue;
+        ['mousedown', 'mouseup', 'click'].forEach(t => dayEl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })));
+        await sleep(800);
+      }
       if (!dateInput.value || dateInput.value.indexOf(String(T.y)) < 0) throw new Error('Date did not take (field shows "' + dateInput.value + '")');
 
       // 3) times
