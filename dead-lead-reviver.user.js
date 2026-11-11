@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.2.0
+// @version      1.2.1
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const BATCH_SIZE = 1000;                  // the run pauses itself after this many revived leads so you can review
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
@@ -66,7 +66,7 @@
     try { document.title = '\u2705 BATCH DONE - ' + document.title.replace(/^\u2705 BATCH DONE - /, ''); } catch (e) { /* ignore */ }
   }
   function stopRun(why) {
-    S.running = false; S.owner = null; S.phase = 'idle'; S.current = null; save();
+    S.running = false; S.stopAfter = false; S.owner = null; S.phase = 'idle'; S.current = null; save();
     log('STOPPED: ' + why, 'warn'); renderPanel();
   }
 
@@ -385,6 +385,7 @@
     if (kind === 'tooNew') S.stats.tooNew++;
     if (kind !== 'ok') log((cur ? cur.name : '?') + ': ' + outcome);
     S.current = null; S.phase = 'list'; save();
+    if (S.stopAfter) return stopRun('Stopped after finishing the lead in progress.');
     if (S.runRevived >= S.maxRevive) { beep(); return stopRun('BATCH COMPLETE: revived ' + S.runRevived + ' lead(s) this run. Totals - checked ' + S.stats.scanned + ', revived ' + S.stats.revived + ', skipped ' + S.stats.skipped + ', too new ' + S.stats.tooNew + ', errors ' + S.stats.errors + '. Download the log, tell Claude, then press Start for the next ' + BATCH_SIZE + '.'); }
     await jitter(500, 1100);
     location.href = LIST_URL;
@@ -451,7 +452,10 @@
       S.maxRevive = v > 0 ? v : BATCH_SIZE; S.runRevived = 0; S.running = true; S.owner = TAB; S.phase = 'list'; S.current = null; save(); log('Started. Will stop after ' + S.maxRevive + ' revived lead(s).');
       if (isListPath()) tick(); else location.href = LIST_URL;
     }));
-    btns.appendChild(mk('Stop', '#b00020', () => { stopRun('You pressed Stop.'); }));
+    btns.appendChild(mk('Stop', '#b00020', () => {
+      if (S.running && S.current && ['reopen', 'appt', 'verify'].indexOf(S.phase) >= 0) { S.stopAfter = true; save(); log('Stop requested - finishing the lead in progress first so it is not left half-done...', 'warn'); }
+      else stopRun('You pressed Stop.');
+    }));
     body.appendChild(btns);
     const btns2 = el('div', 'display:flex;gap:6px;margin:4px 0;');
     btns2.appendChild(mk('Download log', '#555', downloadLog));
