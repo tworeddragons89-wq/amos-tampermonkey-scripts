@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.3.1
+// @version      1.3.2
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.3.1';
+  const VERSION = '1.3.2';
   const BATCH_SIZE = 25;                    // the run pauses itself after this many revived leads so you can review
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
@@ -80,8 +80,9 @@
   function addFlag(category, why) {
     const cur = S.current; if (!cur) return;
     S.flagged = (S.flagged || []).filter(f => f.id !== cur.id);
-    const num = ((cur.name || '').match(/^\s*(\d+-\d+)/) || [])[1] || '';
-    S.flagged.push({ when: new Date().toISOString().slice(0, 19).replace('T', ' '), jobNumber: num, name: cur.name || '', id: cur.id, link: 'https://my.acculynx.com/jobs/' + cur.id, category, why: String(why).slice(0, 300) });
+    const cleanName = (cur.name || '').replace(/\s+/g, ' ').trim();
+    const num = (cleanName.match(/^\s*(\d+-\d+)/) || [])[1] || '';
+    S.flagged.push({ when: new Date().toISOString().slice(0, 19).replace('T', ' '), jobNumber: num, name: cleanName, id: cur.id, link: 'https://my.acculynx.com/jobs/' + cur.id, category, why: String(why).slice(0, 300) });
     save();
   }
   function flagLead(category, why) {
