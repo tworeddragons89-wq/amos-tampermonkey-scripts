@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.1.0
+// @version      1.1.1
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
   const DEFAULT_START_MIN = 6 * 60;         // used only when the lead had NO initial appointment: 6:00 AM
@@ -288,7 +288,7 @@
       S.phase = 'verify'; save();
       saveBtn.click();
       await waitFor(() => !document.querySelector(dsel), 15000);
-      await sleep(2500);
+      await sleep(5000);            // changing an EXISTING appointment can take a few seconds to commit
       location.reload();
     } catch (err) {
       const cancel = [...document.querySelectorAll('button')].find(b => visible(b) && b.textContent.trim() === 'Cancel' && /text-blue/.test(b.className));
@@ -348,6 +348,14 @@
       catch (e) { return failLead('REVIVED + appointment OK, but could not reassign to ' + ASSIGN_REP_TO + ': ' + e.message + ' (fix this lead by hand)', true); }
       log('DONE ' + cur.name + ': initial appt now ' + ov.appt.raw + (cur.info.oldAppt ? ' (was ' + cur.info.oldAppt + ')' : ' (had none)') + ' | rep -> ' + ASSIGN_REP_TO + ' (' + repResult + ')', 'ok');
       return finishLead('revived -> ' + label + ', rep ' + ASSIGN_REP_TO, 'ok');
+    }
+    // Not showing yet - AccuLynx may still be saving. Wait and reload a few times before giving up.
+    cur.verifyTries = (cur.verifyTries || 0) + 1; save();
+    if (cur.verifyTries <= 4) {
+      log('Appointment not showing yet (try ' + cur.verifyTries + '/4), waiting...', 'warn');
+      await sleep(6000);
+      location.reload();
+      return;
     }
     return failLead('REVIVED but the saved appointment does not read ' + label + ' (page shows "' + (ov ? ov.appt.raw || 'blank' : 'n/a') + '")', true);
   }
