@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.1.1
+// @version      1.1.2
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -227,7 +227,9 @@
     const ov = await waitFor(() => { const o = readOverview(); return o.ready ? o : null; }, 25000);
     if (!ov) return failLead('Overview did not load after re-open', true);
     if (ov.dead) return failLead('Lead is STILL dead after clicking Re-Open Job', true);
-    S.stats.revived++; S.runRevived++; save();
+    if (!cur.apptTries) { S.stats.revived++; S.runRevived++; }
+    save();
+    await sleep(cur.apptTries ? 3000 : 8000);   // let AccuLynx finish its own post-re-open work before we edit the appointment
 
     const T = cur.info.target;
     const label = MONTHS[T.m0] + ' ' + T.d + ', ' + T.y;
@@ -351,6 +353,12 @@
     }
     // Not showing yet - AccuLynx may still be saving. Wait and reload a few times before giving up.
     cur.verifyTries = (cur.verifyTries || 0) + 1; save();
+    if (cur.verifyTries === 2 && (cur.apptTries || 0) < 2) {
+      cur.apptTries = (cur.apptTries || 0) + 1; cur.verifyTries = 0; S.phase = 'appt'; save();
+      log('Appointment did not stick - redoing the appointment edit (attempt ' + (cur.apptTries + 1) + ')', 'warn');
+      location.reload();
+      return;
+    }
     if (cur.verifyTries <= 4) {
       log('Appointment not showing yet (try ' + cur.verifyTries + '/4), waiting...', 'warn');
       await sleep(6000);
