@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.7.3
+// @version      5.7.4
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply entering/entered.
@@ -90,6 +90,10 @@
   // GroupMe leaves invisible markers in pasted text (\uFFFC from attachments, zero-width and bidi marks).
   // They survive into names and file names, so scrub them before anything else looks at the message.
   const deGhost = t => (t || '').replace(/[\uFFFC\uFEFF\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, '');
+  // Product Interest = only what the customer WANTS; clauses about what the home already has ("current roof is 20 years old") are dropped
+  function interestOnly(t) {
+    return String(t || '').split(/(?<=[.!?\n;])\s*/).filter(c => !/\b(current(ly)?|existing|already|has a|have a|had a|years? old|yrs? old|installed|replaced)\b/i.test(c) || /\b(want|wants|interested|needs?|replace|quote|estimate|est)\b/i.test(c)).join(' ');
+  }
   function parseLead(text, repName) {
     text = deGhost(text).replace(/\b(\d{1,3}),(\d{3})\b(?!,\d)/g, "$1$2");   // "3,000 Main Street" → 3000
     const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
@@ -172,13 +176,13 @@
     if (nameExtra) lead.extra.unshift('Also: ' + nameExtra);
     // product named inside a sentence ("Three windows are busted out") – still pick it up
     if (!lead.products.length) {
-      const words = [];
-      if (/roof/i.test(text)) words.push('Roof');
-      if (/gutter|guard|gaurd/i.test(text)) words.push('Gutters');
-      if (/siding|hardie|\bhardi\b/i.test(text)) words.push('Siding');
-      if (/window/i.test(text)) words.push('Windows');
-      if (/\bdoors?\b/i.test(text)) words.push('Doors');
-      if (/sof+it+|fa[sc]+ia|\btrim\b/i.test(text)) words.push('Soffit/Fascia/Trim');
+      const words = []; const t2 = interestOnly(text);
+      if (/roof/i.test(t2)) words.push('Roof');
+      if (/gutter|guard|gaurd/i.test(t2)) words.push('Gutters');
+      if (/siding|hardie|\bhardi\b/i.test(t2)) words.push('Siding');
+      if (/window/i.test(t2)) words.push('Windows');
+      if (/\bdoors?\b/i.test(t2)) words.push('Doors');
+      if (/sof+it+|fa[sc]+ia|\btrim\b/i.test(t2)) words.push('Soffit/Fascia/Trim');
       if (words.length) lead.products.push(words.join(', '));
     }
     lead.productText = lead.products.join(' / ') || 'NA';
@@ -231,13 +235,13 @@
     // everything after the phone number = the write-up
     const after = flat.slice(flat.indexOf(phoneM[1]) + phoneM[1].length).replace(/^\s*(phone number|number|cell)?\s*/i, '').trim();
     lead.appt = parseAppt(after) || parseSpokenAppt(after);
-    const prod = [];
-    if (/roof/i.test(after)) prod.push('Roof');
-    if (/gutter/i.test(after)) prod.push('Gutters');
-    if (/siding|hardie|\bhardi\b/i.test(after)) prod.push('Siding');
-    if (/window/i.test(after)) prod.push('Windows');
-    if (/door/i.test(after)) prod.push('Doors');
-    if (/sof+it+|fa[sc]+ia/i.test(after)) prod.push('Soffit/Fascia');
+    const afterP = interestOnly(after), prod = [];
+    if (/roof/i.test(afterP)) prod.push('Roof');
+    if (/gutter/i.test(afterP)) prod.push('Gutters');
+    if (/siding|hardie|\bhardi\b/i.test(afterP)) prod.push('Siding');
+    if (/window/i.test(afterP)) prod.push('Windows');
+    if (/door/i.test(afterP)) prod.push('Doors');
+    if (/sof+it+|fa[sc]+ia/i.test(afterP)) prod.push('Soffit/Fascia');
     lead.productText = prod.join(' / ') || 'NA';
     // Concerns: a short line of its own that is only the appointment ("GUTTER EST. WED 11/25/@2PM") is already in the
     // appointment and the products – leave it out; sentences that mention a date stay as written
@@ -392,10 +396,31 @@
     const m = (lead.raw || '').match(/\b(\d{1,3})\s*(?:\+)?\s*(?:years?|yrs?|yr)\b(?:\s*old)?/i);
     return m ? m[1] + ' years old' : '';
   }
+  // marketer says "call Monday" / "call tomorrow at 3" → that day at 6 AM (the time they ask for is ignored, only noted)
+  function callRequest(lead) {
+    const m = (lead.raw || '').match(/\bcall\b[^.\n]{0,30}?\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tmrw|today)\b[^.\n]*/i);
+    return m ? m[0].replace(/\s+/g, ' ').trim() : '';
+  }
+  function callDate(lead) {
+    const m = (lead.raw || '').match(/\bcall\b[^.\n]{0,30}?\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tmrw|today)\b/i);
+    if (!m) return null;
+    const now = new Date(), d = new Date(now.getFullYear(), now.getMonth(), now.getDate()), w = m[1].toLowerCase();
+    if (w === 'today') return d;
+    if (/^t(omorrow|mrw)$/.test(w)) { d.setDate(d.getDate() + 1); return d; }
+    const days = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+    do { d.setDate(d.getDate() + 1); } while (d.getDay() !== days.indexOf(w));
+    return d;
+  }
+  // CTS (call to schedule) default: 6 AM the next day, never Sunday
+  function nextWorkDay() {
+    const d = new Date(); d.setHours(0, 0, 0, 0);
+    do { d.setDate(d.getDate() + 1); } while (d.getDay() === 0);
+    return d;
+  }
   // blank when unknown – never "NA" (Andrew's rule)
   function notesFor(lead) {
     const v = x => (x && !/^na$/i.test(String(x).trim())) ? String(x).trim() : '';
-    const concerns = [...lead.extra, ...(namedPhones(lead).length ? ['Phones: ' + namedPhones(lead).join(', ')] : [])].join(' ');
+    const concerns = callRequest(lead);                          // Concerns is never filled – only a marketer's "call <day>" request goes in the notes
     return [
       'Lead Source: ' + (lead.leadSource || 'Field Marketing: ' + lead.sender),
       'Product Interest: ' + v(lead.productText),
@@ -1078,14 +1103,13 @@
 
     setValue(f('Notes'), notesFor(lead));
     if (lead.photoOnly) { lead.apptText = '(see Initial Appt)'; return; }
-    let start, end; const a = lead.appt;
+    let start, end; const cd = callDate(lead); const a = cd ? { date: cd, hasTime: false } : lead.appt;
     if (a && a.hasTime) { start = new Date(a.date); start.setHours(a.h, a.m, 0, 0); end = new Date(start.getTime() + CONFIG.apptHours * 3600e3); }
     else {
-      // no time given: 6–7 AM on the post's date; if there is no date at all, today before noon, otherwise tomorrow
-      start = a ? new Date(a.date) : new Date();
-      if (!a && new Date().getHours() >= 12) start.setDate(start.getDate() + 1);
+      // no time given → 6–7 AM. "call <day>" → that day; no date at all → the next day (never Sunday)
+      start = a ? new Date(a.date) : nextWorkDay();
       start.setHours(6, 0, 0, 0); end = new Date(start.getTime() + 3600e3);
-      if (!a) log('No appointment – using ' + (start.getDate() === new Date().getDate() ? 'today' : 'tomorrow') + ' 6–7 AM', true);
+      if (!a) log('No appointment – using next day 6–7 AM (CTS)', true);
     }
     await setApptDate(f('Appointment Date'), start);
     await sleep(600);                                              // times unlock once the date is set
