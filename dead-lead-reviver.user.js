@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.0.1
+// @version      1.1.0
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,8 +15,9 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.0.1';
+  const VERSION = '1.1.0';
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
+  const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
   const DEFAULT_START_MIN = 6 * 60;         // used only when the lead had NO initial appointment: 6:00 AM
   const DEFAULT_END_MIN = 7 * 60;           //                                                      7:00 AM
   const LIST_URL = 'https://my.acculynx.com/jobs/?filters=currentMilestoneList:Dead';
@@ -296,6 +297,44 @@
     }
   }
 
+  /* ---------- reassign the lead to Mars 3 ---------- */
+  async function assignRep(repName, dryRun) {
+    const repLabel = () => { const e = document.querySelector('.job-rep-wrapper .rep-name'); return e ? e.textContent.trim() : ''; };
+    if (repLabel() === repName) return 'already';
+    const wrap = document.querySelector('.job-rep-wrapper');
+    const toggle = wrap && wrap.querySelector('button.no-focus-outline');
+    if (!toggle) throw new Error('assigned-rep box not found');
+    toggle.click();
+    const box = await waitFor(() => document.querySelector('.primary-rep-details'), 6000);
+    if (!box) throw new Error('rep details did not open');
+    let top = box, pencil = null;
+    for (let i = 0; i < 5 && top && !pencil; i++) { pencil = top.querySelector('span.edit'); top = top.parentElement; }
+    if (!pencil) throw new Error('rep edit pencil not found');
+    pencil.click();
+    const sel = await waitFor(() => {
+      const lab = [...document.querySelectorAll('label')].find(l => /Company Representative/.test(l.textContent));
+      let c = lab; for (let i = 0; i < 4 && c && !c.querySelector('select'); i++) c = c.parentElement;
+      return c && c.querySelector('select');
+    }, 10000);
+    if (!sel) throw new Error('Company Representative box did not open');
+    const opt = [...sel.options].find(o => o.text.trim() === repName);
+    if (!opt) throw new Error('"' + repName + '" not in the representative list');
+    if (dryRun) {
+      const cancel = [...document.querySelectorAll('button')].find(b => visible(b) && b.textContent.trim() === 'Cancel');
+      if (cancel) cancel.click();
+      return 'dry-run ok';
+    }
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('input', { bubbles: true }));
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(600);
+    const saveBtn = [...document.querySelectorAll('button')].find(b => visible(b) && b.textContent.trim() === 'Save');
+    if (!saveBtn) throw new Error('Save button not found for representative');
+    saveBtn.click();
+    if (!(await waitFor(() => repLabel() === repName, 12000))) throw new Error('rep still shows "' + repLabel() + '" after save');
+    return 'changed';
+  }
+
   /* ---------- verify ---------- */
   async function doVerify() {
     const cur = S.current;
@@ -304,8 +343,11 @@
     const T = cur.info.target;
     const label = MONTHS[T.m0] + ' ' + T.d + ', ' + T.y;
     if (ov && ov.appt.has && !ov.appt.bad && ov.appt.y === T.y && ov.appt.m0 === T.m0 && ov.appt.d === T.d) {
-      log('DONE ' + cur.name + ': initial appt now ' + ov.appt.raw + (cur.info.oldAppt ? ' (was ' + cur.info.oldAppt + ')' : ' (had none)'), 'ok');
-      return finishLead('revived -> ' + label, 'ok');
+      let repResult;
+      try { repResult = await assignRep(ASSIGN_REP_TO); }
+      catch (e) { return failLead('REVIVED + appointment OK, but could not reassign to ' + ASSIGN_REP_TO + ': ' + e.message + ' (fix this lead by hand)', true); }
+      log('DONE ' + cur.name + ': initial appt now ' + ov.appt.raw + (cur.info.oldAppt ? ' (was ' + cur.info.oldAppt + ')' : ' (had none)') + ' | rep -> ' + ASSIGN_REP_TO + ' (' + repResult + ')', 'ok');
+      return finishLead('revived -> ' + label + ', rep ' + ASSIGN_REP_TO, 'ok');
     }
     return failLead('REVIVED but the saved appointment does not read ' + label + ' (page shows "' + (ov ? ov.appt.raw || 'blank' : 'n/a') + '")', true);
   }
