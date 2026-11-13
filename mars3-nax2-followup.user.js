@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars 3 NAX2 Follow-Up (AccuLynx)
 // @namespace    amos-exteriors.andrew
-// @version      1.7
+// @version      1.8
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars3-nax2-followup.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars3-nax2-followup.user.js
 // @description  Adds a "Mars 3" button to AccuLynx jobs. One click: reads NAX2 history, moves the Mars 3 appointment (1 mo / 3 mo / 6 mo / 1 yr), posts the AST comment, and texts the customer.
@@ -214,7 +214,7 @@
     const parts = product.split(/\s*(?:\/|,|&|\+|\band\b)\s*/).filter(Boolean);
     if (parts.length > 1) product = parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1];
 
-    const draft = `Hey ${s.first}! This is Andrew with Amos Exteriors. You met with ${s.rep} at ${s.met}. I was calling about the ${product} at ${s.address}. Call me back when you get a chance.`;
+    const draft = `Hey ${s.first}! This is Andrew with Amos Exteriors. You met with ${s.rep} at ${s.met}. I was calling about the ${product} at ${s.address}. Call me back when you get a chance. Andrew: (317) 359-3414`;
 
     const summary = `Last NAX2 on this job: ${found < 0 ? 'none' : STEPS[found].label}\n` +
       `Next step: ${next.label}  →  new appointment date ${mdy(newDate)}\n` +
