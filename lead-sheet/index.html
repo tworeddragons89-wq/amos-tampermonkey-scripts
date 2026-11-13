@@ -100,16 +100,17 @@
     </div>
     <label for="mrs">Work Schedule &mdash; Mrs</label><input id="mrs">
     <label for="mr">Work Schedule &mdash; Mr</label><input id="mr">
+    <label for="notes">Notes</label><textarea id="notes" placeholder="Anything else the team should know"></textarea>
 
     <button class="btn post" id="post" type="submit">Post to GroupMe</button>
     <button class="btn alt" id="copy" type="button">Copy message instead</button>
     <button class="btn alt" id="clear" type="button">Clear form</button>
   </form>
   <div id="status" class="msg"></div>
-  <div class="card"><small>Preview</small><pre id="preview" style="white-space:pre-wrap;margin:6px 0 0;font-family:inherit"></pre></div>
+  <div class="card"><small>Preview &middot; <span id="count">0</span>/1000 characters</small><pre id="preview" style="white-space:pre-wrap;margin:6px 0 0;font-family:inherit"></pre></div>
 </div>
 
-<p style="text-align:center;margin:22px 0 6px"><small>Lead Sheet v1.3 &middot; clears after posting</small></p>
+<p style="text-align:center;margin:22px 0 6px"><small>Lead Sheet v1.4 &middot; clears after posting &middot; has Notes</small></p>
 </main>
 
 <script>
@@ -122,7 +123,7 @@ const FIELDS=[
  ["lead_source","Lead Source"],["product_interest","Product Interest"],["current_material","Current Product Material"],
  ["issues","Current Issues/Concerns"],["age_product","Age of Product"],["year_built","Year of Home Built"],
  ["year_purchased","Year Home was Purchased"],["style","Style of Home"],
- ["mrs","Work Schedule - Mrs"],["mr","Work Schedule - Mr"]
+ ["mrs","Work Schedule - Mrs"],["mr","Work Schedule - Mr"],["notes","Notes"]
 ];
 const ALL=["appt_date","appt_time","cts"].concat(FIELDS.map(f=>f[0]));
 const $=id=>document.getElementById(id);
@@ -217,7 +218,10 @@ function buildMessage(){
 }
 function refresh(){
   $("appt_date").disabled=$("appt_time").disabled=$("cts").checked;
-  $("preview").textContent=buildMessage();
+  const msg=buildMessage();
+  $("preview").textContent=msg;
+  $("count").textContent=msg.length;
+  $("count").style.color=msg.length>1000?"#b91c1c":"inherit";
   const d={};ALL.forEach(id=>d[id]=id==="cts"?$(id).checked:$(id).value);save("ls_draft",d);
 }
 ALL.forEach(id=>$(id).addEventListener("input",refresh));
