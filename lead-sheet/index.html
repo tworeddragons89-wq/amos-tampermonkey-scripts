@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lead Sheet</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Lead Sheet">
+<meta name="theme-color" content="#1f3a5f">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f2f4f7;color:#1b1f24;
+       padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+  header{background:#1f3a5f;color:#fff;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+  header h1{font-size:20px;margin:0}
+  #who{font-size:14px;opacity:.9}
+  main{padding:14px;max-width:600px;margin:0 auto}
+  label{display:block;font-weight:600;font-size:14px;margin:14px 0 4px}
+  input,textarea,select{width:100%;font-size:17px;padding:11px;border:1px solid #c5cbd3;border-radius:10px;background:#fff;font-family:inherit}
+  input:disabled{background:#e9ecf0;color:#8a929d}
+  textarea{min-height:70px;resize:vertical}
+  .row{display:flex;gap:10px}.row>div{flex:1}
+  .btn{width:100%;font-size:18px;font-weight:700;padding:15px;border:0;border-radius:12px;margin-top:18px}
+  .post{background:#1f7a3d;color:#fff}
+  .post:disabled{opacity:.6}
+  .alt{background:#e3e8ef;color:#1b1f24;font-size:16px;margin-top:10px}
+  .card{background:#fff;border:1px solid #d5dae1;border-radius:12px;padding:14px;margin-top:12px}
+  .card h2{margin:0 0 6px;font-size:19px}
+  .msg{padding:12px;border-radius:10px;margin-top:14px;font-weight:600;display:none}
+  .ok{background:#d9f2e0;color:#14532d}.err{background:#fde2e2;color:#7f1d1d}.warn{background:#fff3cd;color:#664d03}
+  .cts{display:flex;align-items:center;gap:10px;margin-top:12px;background:#fff;border:1px solid #c5cbd3;border-radius:10px;padding:11px}
+  .cts input{width:24px;height:24px;margin:0}
+  .cts span{font-size:17px;font-weight:600}
+  .view{display:none}
+  small{color:#5b6573}
+</style>
+</head>
+<body>
+<header><h1>Lead Sheet</h1><span id="who"></span></header>
+<main>
+
+<!-- 1. Loading -->
+<div id="v-loading" class="view card"><h2>Loading...</h2><small>Checking your account.</small></div>
+
+<!-- 2. Who are you? -->
+<div id="v-register" class="view card">
+  <h2>Who are you?</h2>
+  <small>Type your first and last name. Andrew will assign your GroupMe thread. You only do this once.</small>
+  <label for="reg_name">Your full name</label>
+  <input id="reg_name" autocapitalize="words" autocomplete="name" placeholder="First and last name">
+  <button class="btn post" id="reg_go" type="button">Request access</button>
+  <div id="reg_msg" class="msg"></div>
+</div>
+
+<!-- 3. Waiting for assignment -->
+<div id="v-pending" class="view card">
+  <h2>Request sent</h2>
+  <p id="pend_text" style="margin:6px 0">Thanks. Andrew has been notified and will assign your thread.</p>
+  <small>This page checks automatically. You can also tap the button below.</small>
+  <button class="btn alt" id="pend_check" type="button">Check again</button>
+</div>
+
+<!-- 4. Network problem -->
+<div id="v-error" class="view card">
+  <h2>Can't connect</h2>
+  <p id="err_text" style="margin:6px 0">Check your internet connection and try again.</p>
+  <button class="btn alt" id="err_retry" type="button">Try again</button>
+</div>
+
+<!-- 5. The lead sheet -->
+<div id="v-form" class="view">
+  <div id="offline" class="msg warn" style="display:none;margin-top:0">No connection. You can fill this out, but Post needs internet. Use "Copy message" if needed.</div>
+  <form id="f" autocomplete="off">
+    <label for="appt_date">Appointment Date</label>
+    <input id="appt_date" type="date">
+    <label for="appt_time">Appointment Time</label>
+    <input id="appt_time" type="time">
+    <label class="cts" for="cts"><input id="cts" type="checkbox"><span>CTS</span></label>
+
+    <div class="row">
+      <div><label for="first_name">First Name</label><input id="first_name" autocapitalize="words"></div>
+      <div><label for="last_name">Last Name</label><input id="last_name" autocapitalize="words"></div>
+    </div>
+    <label for="phone">Phone Number</label><input id="phone" type="tel" inputmode="tel">
+    <label for="email">Email</label><input id="email" type="email" inputmode="email" autocapitalize="off">
+    <label for="address">Address</label><input id="address" placeholder="Street, City, State, Zip" autocapitalize="words">
+
+    <label for="lead_source">Lead Source</label><input id="lead_source">
+    <label for="product_interest">Product Interest</label><input id="product_interest" placeholder="Roofing, siding, windows...">
+    <label for="current_material">Current Product Material</label><input id="current_material">
+    <label for="issues">Current Issues/Concerns</label><textarea id="issues"></textarea>
+    <div class="row">
+      <div><label for="age_product">Age of Product</label><input id="age_product"></div>
+      <div><label for="year_built">Year Home Built</label><input id="year_built" inputmode="numeric"></div>
+    </div>
+    <div class="row">
+      <div><label for="year_purchased">Year Home Purchased</label><input id="year_purchased" inputmode="numeric"></div>
+      <div><label for="style">Style of Home</label><input id="style" placeholder="Ranch, 2-story..."></div>
+    </div>
+    <label for="mrs">Work Schedule &mdash; Mrs</label><input id="mrs">
+    <label for="mr">Work Schedule &mdash; Mr</label><input id="mr">
+
+    <button class="btn post" id="post" type="submit">Post to GroupMe</button>
+    <button class="btn alt" id="copy" type="button">Copy message instead</button>
+    <button class="btn alt" id="clear" type="button">Clear form</button>
+  </form>
+  <div id="status" class="msg"></div>
+  <div class="card"><small>Preview</small><pre id="preview" style="white-space:pre-wrap;margin:6px 0 0;font-family:inherit"></pre></div>
+</div>
+
+</main>
+
+<script>
+// ===== ANDREW: paste the Web App URL from Google Apps Script here (one time) =====
+const API = "https://script.google.com/macros/s/AKfycbwrUuNcs0xkWwxCe50cih_yKR8ssOuQbPAMdOnMncqG06ZiD5sg0B7iXZxiVctQ4kCs/exec";
+// ================================================================================
+
+const FIELDS=[
+ ["first_name","First Name"],["last_name","Last Name"],["phone","Phone Number"],["email","Email"],["address","Address"],
+ ["lead_source","Lead Source"],["product_interest","Product Interest"],["current_material","Current Product Material"],
+ ["issues","Current Issues/Concerns"],["age_product","Age of Product"],["year_built","Year of Home Built"],
+ ["year_purchased","Year Home was Purchased"],["style","Style of Home"],
+ ["mrs","Work Schedule - Mrs"],["mr","Work Schedule - Mr"]
+];
+const ALL=["appt_date","appt_time","cts"].concat(FIELDS.map(f=>f[0]));
+const $=id=>document.getElementById(id);
+function load(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}}
+function save(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
+
+/* ---- device id: this phone's permanent ID (the assignment is tied to it) ---- */
+function newId(){
+  const a=new Uint8Array(12);(window.crypto||{getRandomValues:x=>x.map(()=>Math.random()*256)}).getRandomValues(a);
+  return Array.from(a,b=>("0"+b.toString(16)).slice(-2)).join("");
+}
+let device=load("ls_device","");
+if(!device){device=newId();save("ls_device",device);}
+
+/* ---- talking to the back end ---- */
+async function api(method,payload){
+  const ctl=new AbortController();const to=setTimeout(()=>ctl.abort(),25000);
+  try{
+    let r;
+    if(method==="GET")r=await fetch(API+"?action=status&device="+encodeURIComponent(device),{signal:ctl.signal});
+    else r=await fetch(API,{method:"POST",signal:ctl.signal,
+      headers:{"Content-Type":"text/plain;charset=utf-8"},   // plain text = no browser pre-check
+      body:JSON.stringify(Object.assign({device},payload))});
+    return await r.json();
+  }finally{clearTimeout(to)}
+}
+
+/* ---- screens ---- */
+const VIEWS=["loading","register","pending","error","form"];
+let current="";
+function showView(v){current=v;VIEWS.forEach(n=>$("v-"+n).style.display=n===v?"block":"none");}
+function flash(el,msg,kind){el.textContent=msg;el.className="msg "+kind;el.style.display="block"}
+
+function route(s){
+  if(s.state==="assigned"){
+    save("ls_assigned",s.name||true);
+    $("who").textContent=s.name||"";$("offline").style.display="none";showView("form");
+  }else if(s.state==="pending"){
+    save("ls_assigned",false);
+    $("who").textContent=s.name||"";
+    $("pend_text").textContent="Thanks"+(s.name?", "+s.name:"")+". Andrew has been notified and will assign your thread.";
+    showView("pending");
+  }else{
+    save("ls_assigned",false);$("who").textContent="";showView("register");
+  }
+}
+async function check(){
+  if(API.indexOf("PASTE_")===0){$("err_text").textContent="App not finished being set up (missing server link).";showView("error");return}
+  try{
+    const s=await api("GET");
+    if(s&&s.ok)route(s);else throw new Error("bad");
+  }catch(e){
+    const was=load("ls_assigned",false);
+    if(was){$("who").textContent=typeof was==="string"?was:"";$("offline").style.display="block";showView("form");}
+    else{$("err_text").textContent="Check your internet connection and try again.";showView("error");}
+  }
+}
+$("err_retry").onclick=()=>{showView("loading");check()};
+$("pend_check").onclick=()=>{showView("loading");check()};
+setInterval(()=>{if(current==="pending")check()},20000);
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&(current==="pending"||current==="form"))check()});
+
+/* ---- who are you ---- */
+$("reg_go").onclick=async()=>{
+  const name=$("reg_name").value.trim();
+  if(name.split(" ").filter(Boolean).length<2){flash($("reg_msg"),"Please type your first and last name.","err");return}
+  $("reg_go").disabled=true;$("reg_go").textContent="Sending...";
+  try{
+    const s=await api("POST",{action:"register",name});
+    if(s&&s.ok)route(s);else flash($("reg_msg"),(s&&s.error)||"Something went wrong. Try again.","err");
+  }catch(e){flash($("reg_msg"),"No connection. Try again.","err")}
+  $("reg_go").disabled=false;$("reg_go").textContent="Request access";
+};
+
+/* ---- the lead sheet ---- */
+function apptText(){
+  if($("cts").checked)return "CTS";
+  const d=$("appt_date").value,t=$("appt_time").value;let out=[];
+  if(d){const [y,m,dd]=d.split("-").map(Number);
+    out.push(new Date(y,m-1,dd).toLocaleDateString("en-US",{weekday:"short"})+" "+m+"/"+dd+"/"+y);}
+  if(t){let [h,mi]=t.split(":").map(Number);const ap=h>=12?"PM":"AM";h=h%12||12;
+    out.push(h+":"+String(mi).padStart(2,"0")+" "+ap);}
+  return out.join(" at ");
+}
+function buildMessage(){
+  const lines=["LEAD SHEET","Appointment: "+(apptText()||"-")];
+  FIELDS.forEach(([id,label])=>{
+    const v=$(id).value.trim().replace(/\s*\n\s*/g," ");
+    lines.push(label+": "+(v||"-"));
+  });
+  return lines.join("\n");
+}
+function refresh(){
+  $("appt_date").disabled=$("appt_time").disabled=$("cts").checked;
+  $("preview").textContent=buildMessage();
+  const d={};ALL.forEach(id=>d[id]=id==="cts"?$(id).checked:$(id).value);save("ls_draft",d);
+}
+ALL.forEach(id=>$(id).addEventListener("input",refresh));
+$("cts").addEventListener("change",refresh);
+const d0=load("ls_draft",{});
+ALL.forEach(id=>{if(id==="cts")$(id).checked=!!d0[id];else if(d0[id])$(id).value=d0[id]});
+
+$("f").addEventListener("submit",async e=>{
+  e.preventDefault();
+  const st=$("status");
+  if(!$("cts").checked&&(!$("appt_date").value||!$("appt_time").value)){
+    flash(st,"Pick an appointment date and time, or check CTS.","err");return}
+  const text=buildMessage();
+  if(text.length>1000){flash(st,"Message is too long for GroupMe ("+text.length+"/1000). Shorten the longest answers.","err");return}
+  const btn=$("post");btn.disabled=true;btn.textContent="Posting...";
+  try{
+    const s=await api("POST",{action:"post",text});
+    if(s&&s.ok){resetForm();flash(st,"Posted to your GroupMe thread. The form is cleared for your next lead.","ok");try{st.scrollIntoView({behavior:"smooth",block:"center"})}catch(e){}}
+    else if(s&&(s.state==="pending"||s.state==="none"))route(s);   // assignment was removed
+    else flash(st,(s&&s.error)||"Post failed. Try again.","err");
+  }catch(err){flash(st,"No connection, so it was NOT posted. Try again, or use Copy message.","err")}
+  btn.disabled=false;btn.textContent="Post to GroupMe";
+});
+$("copy").onclick=async()=>{
+  try{await navigator.clipboard.writeText(buildMessage());flash($("status"),"Copied. Paste it into GroupMe.","ok")}
+  catch(e){flash($("status"),"Copy blocked. Select the preview text below and copy it.","err")}
+};
+function resetForm(){
+  ALL.forEach(id=>{if(id==="cts")$(id).checked=false;else $(id).value=""});
+  refresh();
+}
+$("clear").onclick=()=>{if(confirm("Clear all fields?")){resetForm();$("status").style.display="none"}};
+
+refresh();
+showView("loading");
+check();
+</script>
+</body>
+</html>
