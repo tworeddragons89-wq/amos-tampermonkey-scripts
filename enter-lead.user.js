@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.7.5
+// @version      5.7.6
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
-// @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply entering/entered.
+// @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply "entering" to the lead message, and comment "entered" when finished.
 // @match        https://web.groupme.com/*
 // @match        https://my.acculynx.com/*
 // @match        https://www.google.com/maps/*
@@ -501,6 +501,28 @@
     await sleep(500);
     return !!ok;
   }
+  // "entering" as a REPLY to the lead message, so the team (and the audit) can see which lead is being entered.
+  // GroupMe only draws its hover toolbar for a real mouse, but focusing the message's inner box shows the same "Reply to message" button.
+  async function gmReplyTo(msgId, text) {
+    const node = document.querySelector('[data-message-id="' + msgId + '"]');
+    if (node) {
+      node.scrollIntoView({ block: 'center' }); await sleep(400);
+      const cand = [...node.querySelectorAll('[tabindex]'), node, ...node.querySelectorAll('div')].slice(0, 15);
+      let reply = null;
+      for (const e of cand) {
+        try { e.focus({ preventScroll: true }); } catch (_) {}
+        e.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+        reply = await waitFor(() => { const b = node.querySelector('button[aria-label="Reply to message"]'); return b && b.offsetParent ? b : null; }, 700);
+        if (reply) break;
+      }
+      if (reply) {
+        reply.click(); await sleep(700);
+        if (await gmSend(text)) return true;
+      }
+    }
+    log('Could not reply to the lead message – posting "' + text + '" without a reply; reply to it by hand', true);
+    return gmSend(text);
+  }
   async function openChat(chatId) {
     if (currentChatId() === chatId) return true;
     const row = chatRows().find(r => r.getAttribute('data-chat-id') === chatId);
@@ -545,7 +567,7 @@
     }
     btn.disabled = true; btn.textContent = 'Entering…';
     log('Lead: ' + lead.first + ' ' + lead.last + ' (' + repName + ')');
-    await gmSend(CONFIG.replyEntering);
+    await gmReplyTo(node.getAttribute('data-message-id'), CONFIG.replyEntering);
     // lead sheet photo from the same rep, posted just before or after
     const minOf = m => { const x = ((m.innerText || '').match(/(\d{1,2}):(\d{2})\s*([AP])M/i) || []); return x[1] ? ((+x[1] % 12) + (/p/i.test(x[3]) ? 12 : 0)) * 60 + +x[2] : null; };   // message time in minutes
     const msgs = gmMessages(), i = msgs.indexOf(node), sender = gmSender(node);
