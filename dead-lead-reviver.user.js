@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.4.1
+// @version      1.5.0
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.4.1';
+  const VERSION = '1.5.0';
   const BATCH_SIZE = 25;                    // the run pauses itself after this many revived leads so you can review
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
@@ -167,6 +167,59 @@
     return { reason: hit ? '(free text mentions "' + hit.name + '")' : '(no dead reason found)', excluded: hit ? hit.name : null, structured: false };
   }
 
+  /* ---------- SAFEGUARDS (run BEFORE a lead is touched; a lead that fails one is left alone and put on the flagged list) ---------- */
+  // 1) Any appointment that is recent (within the age cutoff) or still upcoming => leave the lead alone.
+  async function readAppointments() {
+    const tab = [...document.querySelectorAll('a,li,span,div')].find(e => visible(e) && e.children.length <= 2 &&
+      e.textContent.trim() === 'Appointments' && e.getBoundingClientRect().top > 100 && e.getBoundingClientRect().top < 260);
+    if (!tab) throw new Error('Appointments tab not found');
+    (tab.closest('a') || tab).click();
+    await sleep(3500);
+    let rows = await waitFor(() => { const x = [...document.querySelectorAll('tr.appointment-table-row')]; return x.length ? x : null; }, 8000);
+    if (!rows) { await sleep(3000); rows = [...document.querySelectorAll('tr.appointment-table-row')]; }
+    const cutoff = cutoffDate(), recent = [];
+    rows.forEach(row => {
+      const txt = row.innerText.replace(/\s+/g, ' ').trim();
+      let newer = false;
+      for (const m of txt.matchAll(/([A-Z][a-z]{2,8})\.? (\d{1,2}), (\d{4})/g)) {
+        const mi = MONTHS.findIndex(x => x.toLowerCase().startsWith(m[1].slice(0, 3).toLowerCase()));
+        if (mi >= 0 && new Date(+m[3], mi, +m[2]) > cutoff) newer = true;
+      }
+      if (!/\bis-past\b/.test(row.className) || newer) recent.push(txt.slice(0, 70));
+    });
+    return { count: rows.length, recent };
+  }
+  // 2) A lead assigned to a rep who is still ACTIVE (anyone in AccuLynx's rep list not marked Inactive) is never taken away from them.
+  //    Inactive reps and reps no longer in the list (removed users) are fine, and so is a lead with no rep or already on Mars 3.
+  async function readRepStatus() {
+    const repLabel = () => { const e = document.querySelector('.job-rep-wrapper .rep-name'); return e ? e.textContent.replace(/\s+/g, ' ').trim() : ''; };
+    const name = repLabel();
+    if (!name || /^unassigned$/i.test(name) || name === ASSIGN_REP_TO) return { name: name || '(none)', active: false, listed: false };
+    const wrap = document.querySelector('.job-rep-wrapper');
+    const toggle = wrap && wrap.querySelector('button.no-focus-outline');
+    if (!toggle) throw new Error('assigned-rep box not found');
+    toggle.click();
+    const box = await waitFor(() => document.querySelector('.primary-rep-details'), 6000);
+    if (!box) throw new Error('rep details did not open');
+    let top = box, pencil = null;
+    for (let i = 0; i < 5 && top && !pencil; i++) { pencil = top.querySelector('span.edit'); top = top.parentElement; }
+    if (!pencil) throw new Error('rep edit pencil not found');
+    pencil.click();
+    const sel = await waitFor(() => {
+      const lab = [...document.querySelectorAll('label')].find(l => /Company Representative/.test(l.textContent));
+      let c = lab; for (let i = 0; i < 4 && c && !c.querySelector('select'); i++) c = c.parentElement;
+      return c && c.querySelector('select');
+    }, 10000);
+    if (!sel) throw new Error('Company Representative list did not open');
+    const opts = [...sel.options].map(o => o.text.replace(/\s+/g, ' ').trim());
+    const strip = t => t.replace(/\s*\(?\binactive\b\)?\s*$/i, '').trim().toLowerCase();
+    const match = opts.find(o => strip(o) === name.toLowerCase());
+    const cancel = [...document.querySelectorAll('button')].find(b => visible(b) && b.textContent.trim() === 'Cancel');
+    if (cancel) cancel.click();
+    await sleep(800);
+    return { name, listed: !!match, active: !!match && !/\binactive\b/i.test(match) };
+  }
+
   /* ---------- list page ---------- */
   async function doList() {
     if (!(await waitFor(() => document.querySelector('li.card a.card-name'), 25000))) {
@@ -224,6 +277,17 @@
     const bt = bodyText();
     const inv = +((bt.match(/Invoices\s*\n?\s*(\d+)/) || [])[1] || 0), ord = +((bt.match(/Orders\s*\n?\s*(\d+)/) || [])[1] || 0);
     if (inv > 0 || ord > 0) return flagLead('Has real history', inv + ' invoice(s), ' + ord + ' order(s) on the job');
+
+    // ---- SAFEGUARD 1: recent / upcoming appointments ----
+    let appts;
+    try { appts = await readAppointments(); } catch (e) { return flagLead('Could not check appointments', e.message); }
+    if (appts.recent.length) return flagLead('Has a recent or upcoming appointment', appts.recent.slice(0, 3).join(' ; '));
+
+    // ---- SAFEGUARD 2: lead belongs to an active rep ----
+    let repInfo;
+    try { repInfo = await readRepStatus(); } catch (e) { return flagLead('Could not check the assigned rep', e.message); }
+    if (repInfo.active) return flagLead('Assigned to an active rep', repInfo.name);
+    cur.priorRep = repInfo.name;
 
     // ---- check the dead reason in the Messages tab ----
     const tab = [...document.querySelectorAll('a,li,span,div')].find(e => visible(e) && e.children.length <= 2 &&
@@ -402,7 +466,7 @@
       let repResult;
       try { repResult = await assignRep(ASSIGN_REP_TO); }
       catch (e) { return failLead('REVIVED + appointment OK, but could not reassign to ' + ASSIGN_REP_TO + ': ' + e.message + ' (fix this lead by hand)', true); }
-      log('DONE ' + cur.name + ': initial appt now ' + ov.appt.raw + (cur.info.oldAppt ? ' (was ' + cur.info.oldAppt + ')' : ' (had none)') + ' | rep -> ' + ASSIGN_REP_TO + ' (' + repResult + ')', 'ok');
+      log('DONE ' + cur.name + ': initial appt now ' + ov.appt.raw + (cur.info.oldAppt ? ' (was ' + cur.info.oldAppt + ')' : ' (had none)') + ' | rep ' + (cur.priorRep || '?') + ' -> ' + ASSIGN_REP_TO + ' (' + repResult + ')', 'ok');
       return finishLead('revived -> ' + label + ', rep ' + ASSIGN_REP_TO, 'ok');
     }
     // Not showing yet - AccuLynx may still be saving. Wait and reload a few times before giving up.
@@ -413,8 +477,8 @@
       location.reload();
       return;
     }
-    if (cur.verifyTries <= 4) {
-      log('Appointment not showing yet (try ' + cur.verifyTries + '/4), waiting...', 'warn');
+    if (cur.verifyTries <= 8) {
+      log('Appointment not showing yet (try ' + cur.verifyTries + '/8), waiting...', 'warn');
       await sleep(6000);
       location.reload();
       return;
