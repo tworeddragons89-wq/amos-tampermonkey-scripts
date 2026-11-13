@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.7.6
+// @version      5.7.7
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply "entering" to the lead message, and comment "entered" when finished.
@@ -516,8 +516,10 @@
         if (reply) break;
       }
       if (reply) {
-        reply.click(); await sleep(700);
-        if (await gmSend(text)) return true;
+        reply.click();
+        // GroupMe shows a "Cancel reply to <name>" chip above the box once the reply is armed – only then type and send
+        const armed = await waitFor(() => document.querySelector('button[aria-label^="Cancel reply to"]'), 3000);
+        if (armed) { if (await gmSend(text)) return true; }
       }
     }
     log('Could not reply to the lead message – posting "' + text + '" without a reply; reply to it by hand', true);
@@ -941,7 +943,7 @@
     if (!win) throw new Error('task window did not open');
     // Assign To = Mars 1 ONLY: remove any other chip, then add Mars 1 if it is not there
     const chips = () => [...(win.querySelector('.ti-tags') || win).querySelectorAll('.ti-tag')];   // first tags box = Assign To (the second one is the job)
-    for (const c of chips()) if (!txt(c).includes(assignee)) { const x = c.querySelector('[class*=close],[class*=actions] *,i,svg,button'); if (x) { x.click(); await sleep(400); } }
+    for (const c of chips()) if (!txt(c).includes(assignee)) { const x = c.querySelector('.ti-icon-close') || c.querySelector('.ti-actions i:last-child'); if (x) { x.click(); await sleep(400); } }
     if (!chips().some(c => txt(c).includes(assignee))) {
       const inp = win.querySelector('input.ti-new-tag-input');
       if (!inp) throw new Error('"Find a person" box not found');
