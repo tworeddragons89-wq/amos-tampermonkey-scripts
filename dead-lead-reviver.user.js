@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.3.3
+// @version      1.4.0
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.3.3';
+  const VERSION = '1.4.0';
   const BATCH_SIZE = 25;                    // the run pauses itself after this many revived leads so you can review
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
@@ -477,7 +477,21 @@
     if (!panel) return;
     const st = S.stats;
     panel.innerHTML = '';
+    if (S.hidden) {       // collapsed: just a small pill that shows the run status; click it (or press Alt+Shift+D) to bring the panel back
+      panel.style.width = 'auto';
+      const pill = el('div', 'padding:5px 11px;background:#1f3b63;color:#fff;border-radius:16px;cursor:pointer;font-weight:bold;white-space:nowrap;', 'DLR ' + (S.running ? '&#9679; running' : '&#9632; stopped') + ' &middot; ' + S.runRevived + ' revived');
+      pill.title = 'Click to show the Dead Lead Reviver panel';
+      pill.onclick = () => { S.hidden = false; save(); renderPanel(); };
+      panel.appendChild(pill);
+      return;
+    }
+    panel.style.width = '320px';
     const head = el('div', 'background:#1f3b63;color:#fff;padding:6px 8px;cursor:move;border-radius:7px 7px 0 0;font-weight:bold;display:flex;justify-content:space-between;', 'Dead Lead Reviver v' + VERSION + '<span>' + (S.running ? (S.owner && S.owner !== TAB ? '&#9679; running in another tab' : '&#9679; RUNNING') : '&#9632; stopped') + '</span>');
+    const hideBtn = el('span', 'cursor:pointer;margin-left:8px;padding:0 6px;border:1px solid #fff;border-radius:3px;font-weight:normal;', 'Hide');
+    hideBtn.title = 'Hide this panel (the script keeps running). Click the small DLR pill or press Alt+Shift+D to show it again.';
+    hideBtn.onmousedown = e => e.stopPropagation();
+    hideBtn.onclick = e => { e.stopPropagation(); S.hidden = true; save(); renderPanel(); };
+    head.appendChild(hideBtn);
     panel.appendChild(head);
     head.onmousedown = e => {
       const dx = e.clientX - panel.offsetLeft, dy = e.clientY - panel.offsetTop;
@@ -525,6 +539,7 @@
     a.download = 'dead-lead-reviver-log.csv'; a.click();
   }
 
+  document.addEventListener('keydown', e => { if (e.altKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) { S.hidden = !S.hidden; save(); renderPanel(); } });
   buildPanel();
   tick();
 })();
