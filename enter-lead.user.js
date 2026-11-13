@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.7.4
+// @version      5.7.5
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply entering/entered.
@@ -912,40 +912,31 @@
     const openBtn = await waitFor(() => [...document.querySelectorAll('button,a,span,div')].find(e => visible(e) && e.children.length < 3 && /^\+?\s*Create Task$/i.test(txt(e))), 20000);
     if (!openBtn) throw new Error('"Create Task" button not found on the Overview page');
     openBtn.scrollIntoView({ block: 'center' }); openBtn.click(); await sleep(1500);
-    // the task window: the smallest visible container that has a text box and a Save/Create button
-    const dlg = () => [...document.querySelectorAll('[role=dialog],.modal,.ax-modal,.ax-drawer,[class*="drawer"],[class*="modal"],[class*="slideout"]')].filter(visible)
-      .filter(d => d.querySelector('input,textarea') && /task/i.test(txt(d))).sort((a, b) => txt(a).length - txt(b).length)[0];
+    // the task window: "Assign To" (person tags box) + "Description" (the task title) + Create button
+    const dlg = () => { const ta = [...document.querySelectorAll('textarea')].filter(visible)[0]; if (!ta) return null;
+      let d = ta; for (let k = 0; k < 12 && d; k++, d = d.parentElement) if (/Assign To/i.test(txt(d)) && [...d.querySelectorAll('button')].some(b => /^Create$/i.test(txt(b)))) return d; return null; };
     const win = await waitFor(dlg, 15000);
     if (!win) throw new Error('task window did not open');
-    // title
-    const boxes = [...win.querySelectorAll('input[type=text],input:not([type]),textarea')].filter(visible);
-    const labelOf = i => ((i.getAttribute('placeholder') || '') + ' ' + (i.getAttribute('aria-label') || '') + ' ' + ((i.closest('div') || {}).innerText || '').slice(0, 60));
-    const titleBox = boxes.find(i => /title|name|subject|task/i.test(labelOf(i))) || boxes[0];
-    if (!titleBox) throw new Error('task title box not found');
-    titleBox.focus(); setValue(titleBox, title); titleBox.dispatchEvent(new Event('blur', { bubbles: true })); await sleep(500);
-    // assigned to: a real <select>, or AccuLynx's custom dropdown
-    const first = assignee.split(' ')[0] + ' ' + assignee.split(' ')[1];
-    const sel = [...win.querySelectorAll('select')].find(x => [...x.options].some(o => o.text.includes(assignee) || o.text.startsWith(first)));
-    if (sel) {
-      const o = [...sel.options].find(o => o.text.includes(assignee)) || [...sel.options].find(o => o.text.startsWith(first));
-      sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true })); sel.dispatchEvent(new Event('input', { bubbles: true }));
-    } else {
-      const lab = [...win.querySelectorAll('label,div,span')].find(e => visible(e) && e.children.length < 3 && /^(assigned to|assign to|assignee|assigned user)\b/i.test(txt(e)));
-      let ctl = lab && (lab.nextElementSibling || (lab.parentElement && lab.parentElement.querySelector('[class*="select"],[class*="dropdown"],input')));
-      if (!ctl) ctl = [...win.querySelectorAll('[class*="select"],[class*="dropdown"]')].filter(visible)[0];
-      if (!ctl) throw new Error('"Assigned to" control not found');
-      ctl.click(); await sleep(800);
-      const typed = ctl.querySelector('input') || document.activeElement;
-      if (typed && typed.tagName === 'INPUT') { setValue(typed, assignee.split(' ')[0] + ' ' + assignee.split(' ')[1]); await sleep(900); }
-      const opt = await waitFor(() => [...document.querySelectorAll('li,div,span,label,a,[role=option]')].find(e => visible(e) && e.children.length < 3 && txt(e) === assignee) ||
-                                      [...document.querySelectorAll('li,div,span,label,a,[role=option]')].find(e => visible(e) && e.children.length < 3 && txt(e).startsWith(first)), 8000);
-      if (!opt) throw new Error('"' + assignee + '" not in the Assigned-to list');
-      opt.click(); await sleep(600);
+    // Assign To = Mars 1 ONLY: remove any other chip, then add Mars 1 if it is not there
+    const chips = () => [...(win.querySelector('.ti-tags') || win).querySelectorAll('.ti-tag')];   // first tags box = Assign To (the second one is the job)
+    for (const c of chips()) if (!txt(c).includes(assignee)) { const x = c.querySelector('[class*=close],[class*=actions] *,i,svg,button'); if (x) { x.click(); await sleep(400); } }
+    if (!chips().some(c => txt(c).includes(assignee))) {
+      const inp = win.querySelector('input.ti-new-tag-input');
+      if (!inp) throw new Error('"Find a person" box not found');
+      inp.focus(); inp.click(); setValue(inp, assignee.split(' ').slice(0, 2).join(' ')); await sleep(1200);
+      const opt = await waitFor(() => [...document.querySelectorAll('.ti-autocomplete li,.ti-item,[role=option],li')].find(e => visible(e) && txt(e).includes(assignee) && !e.closest('.ti-tags .ti-tag')), 8000);
+      if (!opt) throw new Error('"' + assignee + '" not in the Find-a-person list');
+      opt.click(); await sleep(700);
     }
-    const save = [...win.querySelectorAll('button')].filter(visible).find(b => /^(save|create|create task|add task|add)$/i.test(txt(b)) && !b.disabled);
-    if (!save) throw new Error('task Save button not found');
+    if (!chips().some(c => txt(c).includes(assignee)) || chips().length !== 1) throw new Error('Assign To is not only ' + assignee);
+    // Description = the task title
+    const desc = win.querySelector('textarea');
+    desc.focus(); setValue(desc, title); desc.dispatchEvent(new Event('blur', { bubbles: true })); await sleep(500);
+    if (desc.value.trim() !== title) throw new Error('task Description did not take');
+    const save = [...win.querySelectorAll('button')].filter(visible).find(b => /^create$/i.test(txt(b)) && !b.disabled);
+    if (!save) throw new Error('task Create button not found');
     save.click();
-    const ok = await waitFor(() => /task (was )?(created|saved|added)|created successfully|saved successfully|submitted successfully/i.test(document.body.innerText) || !dlg(), 15000);
+    const ok = await waitFor(() => !dlg(), 15000);
     if (!ok) throw new Error('task was not confirmed');
     await sleep(1200);
   }
