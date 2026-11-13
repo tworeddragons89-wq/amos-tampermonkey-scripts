@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.4.0
+// @version      1.4.1
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.1';
   const BATCH_SIZE = 25;                    // the run pauses itself after this many revived leads so you can review
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
@@ -58,6 +58,7 @@
     // v1.3.0 had a bug that skipped leads as "Duplicate" because it read its own log panel: forget those so they get re-checked
     for (const k of Object.keys(S.processed || {})) { if (/^skip: dead reason/.test(S.processed[k])) delete S.processed[k]; }
   }
+  if (S.uiVer !== 2) { S.uiVer = 2; S.hidden = true; }     // start collapsed to the small DEAD REVIVE button
   const save = () => { if (S.running && S.owner && S.owner !== TAB) return; try { GM_setValue(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } };
 
   function log(msg, level) {
@@ -477,14 +478,29 @@
     if (!panel) return;
     const st = S.stats;
     panel.innerHTML = '';
-    if (S.hidden) {       // collapsed: just a small pill that shows the run status; click it (or press Alt+Shift+D) to bring the panel back
+    if (S.hidden) {       // collapsed: one small draggable "DEAD REVIVE" button. Click it to open the panel; drag it to move it.
       panel.style.width = 'auto';
-      const pill = el('div', 'padding:5px 11px;background:#1f3b63;color:#fff;border-radius:16px;cursor:pointer;font-weight:bold;white-space:nowrap;', 'DLR ' + (S.running ? '&#9679; running' : '&#9632; stopped') + ' &middot; ' + S.runRevived + ' revived');
-      pill.title = 'Click to show the Dead Lead Reviver panel';
-      pill.onclick = () => { S.hidden = false; save(); renderPanel(); };
+      const dot = '<span style="color:' + (S.running ? '#5CFF7A' : '#ff8a8a') + ';">&#9679;</span> ';
+      const pill = el('div', 'padding:6px 12px;background:#1f3b63;color:#fff;border-radius:6px;cursor:move;font-weight:bold;white-space:nowrap;user-select:none;letter-spacing:.5px;', dot + 'DEAD REVIVE');
+      pill.title = (S.running ? 'Running' : 'Stopped') + ' - ' + S.runRevived + ' revived this run. Click to open, drag to move.';
+      pill.onmousedown = e => {
+        const sx = e.clientX, sy = e.clientY, dx = e.clientX - panel.offsetLeft, dy = e.clientY - panel.offsetTop; let moved = false;
+        const mv = ev => {
+          if (!moved && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) > 4) moved = true;
+          if (moved) { panel.style.left = (ev.clientX - dx) + 'px'; panel.style.top = (ev.clientY - dy) + 'px'; }
+        };
+        const up = () => {
+          document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+          if (moved) { S.pos = { top: panel.offsetTop, left: panel.offsetLeft }; save(); }
+          else { S.hidden = false; save(); renderPanel(); }
+        };
+        document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); e.preventDefault();
+      };
       panel.appendChild(pill);
+      panel.style.background = 'transparent'; panel.style.border = '0'; panel.style.boxShadow = 'none';
       return;
     }
+    panel.style.background = '#fff'; panel.style.border = '1px solid #1f3b63'; panel.style.boxShadow = '0 4px 18px rgba(0,0,0,.3)';
     panel.style.width = '320px';
     const head = el('div', 'background:#1f3b63;color:#fff;padding:6px 8px;cursor:move;border-radius:7px 7px 0 0;font-weight:bold;display:flex;justify-content:space-between;', 'Dead Lead Reviver v' + VERSION + '<span>' + (S.running ? (S.owner && S.owner !== TAB ? '&#9679; running in another tab' : '&#9679; RUNNING') : '&#9632; stopped') + '</span>');
     const hideBtn = el('span', 'cursor:pointer;margin-left:8px;padding:0 6px;border:1px solid #fff;border-radius:3px;font-weight:normal;', 'Hide');
