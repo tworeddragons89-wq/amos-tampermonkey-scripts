@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.7.9
+// @version      5.7.10
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply "entering" to the lead message, and comment "entered" when finished.
@@ -146,6 +146,7 @@
     if (!/\b\d{5}\b/.test(addr.replace(/^\s*\d+/, '')) && /^\d{5}(-\d{4})?$/.test(zipLine)) addr += ' ' + zipLine;
     addr = addr.replace(/\b(?:cty|co|cnty)\.?\s*r(?:oa)?d\.?(?=\s*\d)/i, 'County Road');   // "123 N Cty Rd 500 E"
     addr = addr.replace(/([A-Za-z])\.(?=\s*,?\s*(?:IN\b\.?\s*)?\d{5}\b)/g, '$1');                  // "Anderson. 46013" → "Anderson 46013"
+    addr = addr.replace(/\b(St|Ave|Dr|Rd|Ln|Blvd|Ct|Cir|Pl|Ter|Pkwy|Hwy|Trl)\.(?=[,\s]|$)/gi, '$1');       // "3951 Broadway St.," → "3951 Broadway St," (the period made AccuLynx's address match pick another street)
     lead.address = addr.replace(/\bindiana\b/i, 'IN').replace(/\s+/g, ' ');
     const zipAll = [...lead.address.matchAll(/\b(4\d{4})\b/g)].filter(m => m.index > 0); lead.zip = zipAll.length ? zipAll[zipAll.length - 1][1] : '';
     const email = text.match(/[A-Za-z0-9._%+-]*[A-Za-z][A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/); lead.email = email ? email[0] : '';
@@ -165,6 +166,12 @@
       if ((/\d{1,2}\/\d{1,2}/.test(l) || /(?<![\d-])\d{1,2}-\d{1,2}(?![\d-])/.test(l) || /(?<![\d-])\d{1,2}-\d{1,2}-\d{2,4}(?!\d)/.test(l)) && l.length < 40) return;
       if (/^[a-z]{1,3}\d{0,2}$/i.test(l)) return;                                   // rep codes like "Zl1"
       if (new RegExp('^(' + MONTHS.map(m => m.slice(0, 3)).join('|') + ')[a-z]*\\.?\\s+\\d', 'i').test(l) && l.length < 40) return;
+      if (PRODUCT_RE.test(l) && (l.length >= 60 || l.split(/\s+/).length > 6 || /[.!?]\s*$/.test(l))) {         // a SENTENCE that mentions a product ("needs front door replaced!") → just the product words
+        const t2 = interestOnly(l), words = [];
+        if (/roof/i.test(t2)) words.push('Roof'); if (/gutter|guard|gaurd/i.test(t2)) words.push('Gutters'); if (/siding|hardie|\bhardi\b/i.test(t2)) words.push('Siding');
+        if (/window/i.test(t2)) words.push('Windows'); if (/\bdoors?\b/i.test(t2)) words.push('Doors'); if (/sof+it+|fa[sc]+ia|\btrim\b/i.test(t2)) words.push('Soffit / Fascia');
+        if (words.length) { lead.products.push(words.join(' / ')); return; }
+      }
       if (PRODUCT_RE.test(l) && l.length < 60) {                                    // "130 sofit" → "sofit";  "Soffit/fascia Est" → "Soffit / Fascia"
         const clean = l.replace(/^\d{1,4}(:\d{2})?\s*(am|pm|a|p)?\s+/i, '').replace(/\b(?:est(?:imates?)?|quotes?|inspections?)\b\.?/ig, ' ').replace(/\b(?:original|old|existing|current)\b/ig, ' ').replace(/(^|[\/,+&]\s*)\d{1,3}\s+(?=[A-Za-z])/g, '$1').replace(/\s+/g, ' ').trim();
         const parts = clean.split(/\s*(?:\/|,|\+|&|\band\b)\s*/i).map(x => x.trim()).filter(Boolean);
