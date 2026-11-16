@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.1.0
+// @version      1.2.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -288,11 +288,13 @@
     // a phone or email match alone is not enough (numbers get reused) – it must also share the name or the address
     const strong = x => x.why.includes('address') || (x.why.includes('name') && (x.why.includes('phone') || x.why.includes('email')));
     const jobs = matches.filter(x => x.Type !== 'Contact' && x.Id && strong(x));
-    const sold = jobs.find(x => SOLD.test(x.CurrentMilestone || ''));
+    const sold = jobs.filter(x => SOLD.test(x.CurrentMilestone || '') && /^IN-\d+/.test(x.Name || '')).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
     const open = jobs.filter(x => OPEN.test(x.CurrentMilestone || '')).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
     const dead = jobs.filter(x => DEAD.test(x.CurrentMilestone || '')).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
     let plan;
-    if (open || dead) {
+    // Andrew's rules: an OPEN lead (Lead / Prospect) at the house is used; otherwise a SOLD job means a new lead with the
+    // IN number in Cross Reference; only when the house has nothing but dead jobs is the newest dead job revived
+    if (open || (dead && !sold)) {
       const j = open || dead;
       const oldest = jobs.filter(x => !DEAD.test(x.CurrentMilestone || '') || x === j).sort((a, b) => (a.MilestoneStart || '').localeCompare(b.MilestoneStart || ''))[0] || j;
       const overYear = oldest.MilestoneStart && (Date.now() - new Date(oldest.MilestoneStart)) / 864e5 > 365;
@@ -485,7 +487,11 @@
         geoLine.textContent = 'Map: ' + g.matched + (g.exact ? '' : '  (approximate - check the house number)');
         if (openTabs) {
           // 2. Street View of the house   3. Predictive Sales AI storm map
-          GM_openInTab(`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${g.lat},${g.lon}`, { active: false, insert: true });
+          // Google looks up the exact house; the Maps part of this script then clicks Google's Street View picture of it
+          // (the map lookup above aims at the street, so a Street View from it can face the house across the road)
+          GM_setValue('mlf_sv_req', { t: Date.now() });
+          const ad = splitAddress(f.address);
+          GM_openInTab('https://www.google.com/maps/place/' + encodeURIComponent(oneLine({ street: ad.street, city: ad.city || g.city, zip: ad.zip || g.zip })), { active: false, insert: true });
           GM_openInTab('https://apps.predictivesalesai.com/admin/weather/map?' + new URLSearchParams({ lat: g.lat, long: g.lon, zoom: '13', exactcoords: 'true', displayaddress: f.address + ' USA' }), { active: false, insert: true });
         }
         return g;
@@ -653,10 +659,22 @@
   }
 
   /* ======================================================================================
-     GOOGLE MAPS: hand back the Street View picture of the house (only for a tab this script opened)
+     GOOGLE MAPS (only for a tab this script opened):
+       - Check for Duplicate: open Street View of the house by clicking Google's own Street View picture
+       - AccuLynx photos: hand back the Street View picture of the house
      ====================================================================================== */
   if (location.host === 'www.google.com' && /^\/maps\/place\//.test(location.pathname)) {
     (async () => {
+      const sv = GM_getValue('mlf_sv_req', null);
+      if (sv && Date.now() - sv.t < 60000) {
+        GM_deleteValue('mlf_sv_req');
+        const thumb = await waitFor(() => {
+          const i = [...document.querySelectorAll('img')].find(x => /streetviewpixels-pa\.googleapis\.com/.test(x.src) && x.getBoundingClientRect().width > 80);
+          return i ? (i.closest('button,a,[role="button"]') || i) : null;
+        }, 20000, 500);
+        if (thumb) thumb.click();      // no picture = Google has no Street View here; the house pin stays on screen
+        return;
+      }
       const req = GM_getValue('mlf_house_req');
       if (!req || Date.now() - req.t > 60000) return;
       const img = await waitFor(() => [...document.querySelectorAll('img')].find(i => i.getBoundingClientRect().width > 200 && i.src), 20000, 500);
