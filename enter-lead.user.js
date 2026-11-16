@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.7.8
+// @version      5.7.9
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply "entering" to the lead message, and comment "entered" when finished.
@@ -957,7 +957,7 @@
       inp.focus(); inp.click(); setValue(inp, assignee.split(' ').slice(0, 2).join(' ')); await sleep(1200);
       const opt = await waitFor(() => [...win.querySelectorAll('.ti-autocomplete li.ti-item')].find(e => visible(e) && txt(e).includes(assignee)), 8000);
       if (!opt) throw new Error('"' + assignee + '" not in the Find-a-person list');
-      for (const t of ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click']) opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); await sleep(700);
+      for (const t of ['mouseenter', 'mouseover', 'mousedown', 'mouseup']) { try { opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true })); } catch (_) {} } opt.click(); await sleep(700);
       if (!chips().some(c => txt(c).includes(assignee))) { inp.focus(); inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true })); await sleep(700); }
     }
     if (!chips().some(c => txt(c).includes(assignee)) || chips().length !== 1) throw new Error('Assign To is not only ' + assignee);
