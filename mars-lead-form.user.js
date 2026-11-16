@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.2.0
+// @version      1.3.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -45,10 +45,12 @@
        NEW LEAD   -> AccuLynx Create Lead (notes template, trades, appointment, assigned to Mars 1 /
                      Needs Confirmed / Mars 2), Save, house + overview pictures, house picture on Location
                      Info, "Lead Source / Initial Appt" and "Claude" replies, task "Claude Automated Lead" for Mars 1.
-       DUPLICATE  -> (Lead / Prospect / Dead job at the same house) the OLD job is used: re-opened if dead,
-                     new initial appointment, assigned, the new notes posted in the job, task for Mars 1.
-                     A SOLD job (Approved / Completed / Invoiced / Closed) gets a NEW lead with the IN number in
-                     Cross Reference and the notes.
+       DUPLICATE  -> every AccuLynx record found has a link (opens in a background tab, the form stays open) and a
+                     DUPLICATE box. Tick the box on the matching record (the likely one says "suggested"):
+                     Lead / Prospect / Dead job -> that job is used: re-opened if dead, new initial appointment,
+                     assigned, the filled-out lead report posted in its comments, task for Mars 1, Lead Table.
+                     SOLD job (Approved / Completed / Invoiced / Closed) -> a NEW lead with the IN number in
+                     Cross Reference. No box ticked = NEW lead (Complete asks first if a likely duplicate was found).
        ROOF ONLY  -> when the address is in a roof-only zone, every product other than Roof (ticked or typed in
                      the "other" box) is flagged OOA in red, Complete asks first, and the notes get an OOA line.
        LEAD TABLE -> the lead is written into that day's Lead Pool row (Morning / Afternoon / Evening), linked
@@ -304,6 +306,13 @@
     } else plan = { kind: 'new' };
     return { matches, plan, errors };
   }
+  // what Complete does with the record the rep checked as the duplicate
+  function planForPick(j) {
+    if (!j) return { kind: 'new' };
+    if (SOLD.test(j.CurrentMilestone || '')) return { kind: 'sold', crossRef: ((j.Name || '').match(/^IN-\d+/) || [''])[0], name: j.Name, milestone: j.CurrentMilestone };
+    const overYear = !!j.MilestoneStart && (Date.now() - new Date(j.MilestoneStart)) / 864e5 > 365;
+    return { kind: 'revive', jobId: j.Id, name: j.Name, milestone: j.CurrentMilestone, dead: DEAD.test(j.CurrentMilestone || ''), address: j.FullAddress, overYear };
+  }
 
   /* ======================================================================================
      GROUPME: the form
@@ -506,26 +515,39 @@
         result.dup = d; dupLine.textContent = '';
         if (!d.matches.length) dupLine.appendChild(el('b', `color:${GREEN}`, 'AccuLynx: no duplicate found - a NEW lead will be created.'));
         else {
-          const planTxt = d.plan.kind === 'revive' ? `DUPLICATE - Complete will use the existing job ${d.plan.name} (${d.plan.milestone})${d.plan.dead ? ', re-open it' : ''}, set the new appointment and add the notes there.`
-            : d.plan.kind === 'sold' ? `SOLD customer (${d.plan.name}, ${d.plan.milestone}) - a NEW lead will be created with ${d.plan.crossRef || 'the IN number'} in Cross Reference.`
-            : 'Similar records found, but none is the same house - a NEW lead will be created.';
-          dupLine.appendChild(el('b', `color:${d.plan.kind === 'new' ? NAVY : RED}`, 'AccuLynx: ' + planTxt));
+          const sugId = d.plan.kind === 'revive' ? d.plan.jobId : d.plan.kind === 'sold' ? (d.matches.find(x => x.Name === d.plan.name) || {}).Id : null;
+          dupLine.appendChild(el('b', `color:${sugId ? RED : NAVY}`, sugId ? 'AccuLynx: POSSIBLE DUPLICATE - open the record to look, then tick DUPLICATE on the matching one.' : 'AccuLynx: similar records found (none at the same house). Tick DUPLICATE only if one is the same customer.'));
+          const planLine = el('div', 'margin:4px 0;font-weight:700');
+          const showPlan = () => {
+            const pl = planForPick(result.pick);
+            planLine.style.color = pl.kind === 'new' ? GREEN : RED;
+            planLine.textContent = 'Complete will: ' + (pl.kind === 'new' ? 'create a NEW lead.'
+              : pl.kind === 'sold' ? `create a NEW lead with ${pl.crossRef || 'the IN number'} in Cross Reference (sold customer).`
+              : `use ${pl.name || 'that job'} (${pl.milestone})${pl.dead ? ', re-open it' : ''}, set the new appointment, put the lead report in its comments and finish the lead entry there.` +
+                (pl.overYear ? ' It is over 1 year old - its Lead Source must change to the new source (listed as a to-do).' : ''));
+          };
           const ul = el('div', `margin:4px 0 0 8px;border-left:3px solid ${LINE};padding-left:6px`);
-          d.matches.slice(0, 8).forEach(x => {
-            const r = el('div', 'margin:2px 0');
-            const name = x.Type !== 'Contact' && x.Id ? el('a', 'color:#1155cc;font-weight:700', x.Name || '(job)', { href: 'https://my.acculynx.com/jobs/' + x.Id, target: '_blank' }) : el('b', '', (x.Name || '(contact)') + ' [contact]');
-            r.appendChild(name);
+          const boxes = [];
+          d.matches.slice(0, 10).forEach(x => {
+            const r = el('div', 'margin:3px 0');
+            const isJob = x.Type !== 'Contact' && x.Id;
+            if (isJob) {
+              const url = 'https://my.acculynx.com/jobs/' + x.Id;
+              const a = el('a', 'color:#1155cc;font-weight:700;cursor:pointer', x.Name || '(job)', { href: url, title: 'opens in a new tab - this form stays open' });
+              a.onclick = e => { e.preventDefault(); GM_openInTab(url, { active: false, insert: true }); a.style.color = '#6b3fa0'; };
+              r.appendChild(a);
+            } else r.appendChild(el('b', '', (x.Name || '(contact)') + ' [contact]'));
             r.appendChild(document.createTextNode(` - ${x.CurrentMilestone || ''} ${x.MilestoneStart ? '(' + String(x.MilestoneStart).slice(0, 10) + ')' : ''} · ${x.FullAddress || ''} · same ${x.why.join(', ')}`));
+            if (isJob) {
+              const l = el('label', `display:inline-flex;align-items:center;gap:3px;margin-left:6px;padding:1px 6px;border:1px solid ${RED};border-radius:10px;color:${RED};font-weight:700;font-size:11px;cursor:pointer;white-space:nowrap`);
+              const c = el('input', 'margin:0', null, { type: 'checkbox' });
+              c.onchange = () => { boxes.forEach(b => { if (b !== c) b.checked = false; }); result.pick = c.checked ? x : null; showPlan(); };
+              boxes.push(c); l.appendChild(c); l.appendChild(document.createTextNode('DUPLICATE' + (x.Id === sugId ? ' (suggested)' : '')));
+              r.appendChild(l);
+            }
             ul.appendChild(r);
           });
-          dupLine.appendChild(ul);
-          if (d.plan.kind === 'revive' && d.plan.overYear) dupLine.appendChild(el('div', `color:${RED}`, 'The original job is over 1 year old - its Lead Source must be changed to the new source (listed as a to-do when finished).'));
-          if (d.plan.kind !== 'new') {
-            const l = el('label', 'display:flex;gap:4px;margin-top:4px;cursor:pointer');
-            const c = el('input', '', null, { type: 'checkbox' }); c.onchange = () => { result.forceNew = c.checked; };
-            l.appendChild(c); l.appendChild(document.createTextNode('Not the same customer - enter it as a NEW lead anyway'));
-            dupLine.appendChild(l);
-          }
+          dupLine.appendChild(ul); dupLine.appendChild(planLine); showPlan();
         }
         if (d.errors.length) dupLine.appendChild(el('div', `color:${RED}`, 'Search problems: ' + d.errors.join('; ')));
       }).catch(e => { dupLine.textContent = 'AccuLynx: ' + e.message; dupLine.style.color = RED; });
@@ -580,7 +602,8 @@
       if (chk.area && /OUT OF AREA/.test(chk.area.verdict) && !confirm('This address is OUT OF the service area. Enter the lead anyway?')) return;
       const ooa = chk.area && chk.area.roofOnly ? ooaProducts(f.products, f.productOther) : [];
       if (ooa.length && !confirm('This address is in a ROOF ONLY area.\nOOA for: ' + ooa.join(', ') + '\n\nEnter the lead anyway? (the OOA line goes in the notes)')) return;
-      const plan = chk.forceNew ? { kind: 'new' } : chk.dup.plan;
+      const plan = planForPick(chk.pick);
+      if (!chk.pick && chk.dup.plan.kind !== 'new' && !confirm(`AccuLynx found a likely duplicate (${chk.dup.plan.name || 'same house'}), but no DUPLICATE box is ticked.\n\nOK = enter it as a NEW lead anyway\nCancel = go back and tick the matching record`)) return;
       const mins = f.workType === 'Insurance' ? CONFIG.INSURANCE_HOURS * 60 : CONFIG.RETAIL_HOURS * 60;
       const end = new Date(start.getTime() + (f.cts ? 60 : mins) * 60e3);
       const tf = d => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
