@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.3.0
+// @version      1.4.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -59,6 +59,10 @@
                      DO NOT FILL. White fill, black letters, Arial 9. CTS leads (no time) are not put on the table.
      The Lead Table opens in its own tab for a few seconds to do the typing (Chrome will not type in a
      background tab) and closes itself.
+  SCREEN 2 (optional): press "Screen 2" at the top of the form once. A "SCREEN 2" tab opens (Lead Table, read-only);
+     drag that tab onto your other screen and leave it open. From then on Check for Duplicate opens its tabs in THAT
+     window: Street View of the house in front, the storm map behind it, and AccuLynx records you click go behind
+     too. The next lead's Check for Duplicate closes the last lead's tabs there. No Screen 2 tab open = tabs open here.
   4. The "Recent" list at the bottom of the form shows how each lead is going and anything left to do by hand.
 */
 
@@ -326,6 +330,22 @@
     const panel = el('div', `position:fixed;z-index:2147483001;width:460px;max-width:calc(100vw - 16px);background:#fff;border:1px solid ${LINE};border-radius:10px;box-shadow:0 8px 28px rgba(16,24,40,.25);font:13px Arial,sans-serif;color:#1d2430;display:none;overflow:auto`);
     const head = el('div', `position:sticky;top:0;z-index:1;padding:10px 14px;background:${GREEN};color:#fff;display:flex;align-items:center;border-radius:10px 10px 0 0`);
     head.appendChild(el('div', 'flex:1;font-weight:700;font-size:14px', 'Mars Lead Form'));
+    // Screen 2: a tab the team drags onto the other monitor; Check for Duplicate's tabs open in that window
+    const s2Alive = () => Date.now() - GM_getValue('mlf_s2_hb', 0) < 15000;
+    const s2Btn = el('button', 'border:1px solid rgba(255,255,255,.6);background:none;color:#fff;border-radius:6px;padding:3px 8px;font:600 11px Arial,sans-serif;cursor:pointer;margin-right:10px', '', { title: 'Open the Screen 2 tab, then drag it onto your other screen' });
+    const paintS2 = () => { s2Btn.textContent = (s2Alive() ? '● ' : '○ ') + 'Screen 2'; s2Btn.style.background = s2Alive() ? 'rgba(255,255,255,.25)' : 'none'; };
+    paintS2(); setInterval(paintS2, 3000);
+    s2Btn.onclick = () => {
+      if (s2Alive()) { status('Screen 2 is already open - its tabs open in that window. To move it, drag the SCREEN 2 tab to the other screen.'); return; }
+      GM_openInTab(`https://docs.google.com/spreadsheets/d/${CONFIG.LEAD_TABLE_ID}/htmlview#mlfscreen2`, { active: true, insert: true });
+      status('A "SCREEN 2" tab just opened. Drag that tab out of this window and drop it on your other screen, then make it full screen. Leave it open.');
+    };
+    head.appendChild(s2Btn);
+    // list = [{ url, front }]; newLead = the tabs of the previous lead on Screen 2 are closed first
+    function openOnScreen(list, newLead) {
+      if (s2Alive()) { GM_setValue('mlf_s2_open', { id: Date.now() + '-' + Math.random().toString(36).slice(2), list, newLead }); return; }
+      list.forEach(x => GM_openInTab(x.url, { active: false, insert: true }));
+    }
     const xBtn = el('button', 'border:0;background:none;color:#fff;font-size:20px;cursor:pointer;line-height:1', '×');
     head.appendChild(xBtn);
     const body = el('div', 'padding:12px 14px 14px');
@@ -500,12 +520,14 @@
           // (the map lookup above aims at the street, so a Street View from it can face the house across the road)
           GM_setValue('mlf_sv_req', { t: Date.now() });
           const ad = splitAddress(f.address);
-          GM_openInTab('https://www.google.com/maps/place/' + encodeURIComponent(oneLine({ street: ad.street, city: ad.city || g.city, zip: ad.zip || g.zip })), { active: false, insert: true });
-          GM_openInTab('https://apps.predictivesalesai.com/admin/weather/map?' + new URLSearchParams({ lat: g.lat, long: g.lon, zoom: '13', exactcoords: 'true', displayaddress: f.address + ' USA' }), { active: false, insert: true });
+          openOnScreen([
+            { url: 'https://www.google.com/maps/place/' + encodeURIComponent(oneLine({ street: ad.street, city: ad.city || g.city, zip: ad.zip || g.zip })), front: true },
+            { url: 'https://apps.predictivesalesai.com/admin/weather/map?' + new URLSearchParams({ lat: g.lat, long: g.lon, zoom: '13', exactcoords: 'true', displayaddress: f.address + ' USA' }) },
+          ], true);
         }
         return g;
       }).catch(e => { geoLine.textContent = 'Map: ' + e.message; geoLine.style.color = RED; return null; });
-      if (openTabs) geoP.then(g => { if (!g) GM_openInTab('https://www.google.com/maps/search/' + encodeURIComponent(f.address), { active: false, insert: true }); });
+      if (openTabs) geoP.then(g => { if (!g) openOnScreen([{ url: 'https://www.google.com/maps/search/' + encodeURIComponent(f.address), front: true }], true); });
       const areaP = geoP.then(async g => {
         if (!g) { areaLine.textContent = 'Service area: needs the map location'; return; }
         try { result.area = await serviceAreaVerdict(g); setTimeout(paintOoa, 0); areaLine.textContent = ''; areaLine.appendChild(el('b', `color:${result.area.color}`, 'Service area: ' + result.area.verdict)); if (result.area.notes.length) areaLine.appendChild(document.createTextNode('  (' + result.area.notes.join(', ') + ')')); }
@@ -534,7 +556,7 @@
             if (isJob) {
               const url = 'https://my.acculynx.com/jobs/' + x.Id;
               const a = el('a', 'color:#1155cc;font-weight:700;cursor:pointer', x.Name || '(job)', { href: url, title: 'opens in a new tab - this form stays open' });
-              a.onclick = e => { e.preventDefault(); GM_openInTab(url, { active: false, insert: true }); a.style.color = '#6b3fa0'; };
+              a.onclick = e => { e.preventDefault(); openOnScreen([{ url }], false); a.style.color = '#6b3fa0'; };
               r.appendChild(a);
             } else r.appendChild(el('b', '', (x.Name || '(contact)') + ' [contact]'));
             r.appendChild(document.createTextNode(` - ${x.CurrentMilestone || ''} ${x.MilestoneStart ? '(' + String(x.MilestoneStart).slice(0, 10) + ')' : ''} · ${x.FullAddress || ''} · same ${x.why.join(', ')}`));
@@ -727,6 +749,30 @@
      LEAD TABLE: write the lead into the Lead Pool (runs in its own visible tab)
      ====================================================================================== */
   if (location.host === 'docs.google.com') {
+    let screen2 = false;
+    try { if (/mlfscreen2/.test(location.hash)) sessionStorage.setItem('mlfScreen2', '1'); screen2 = sessionStorage.getItem('mlfScreen2') === '1'; } catch (e) { /* ignore */ }
+    if (screen2) {
+      // SCREEN 2: opens Check for Duplicate's tabs in THIS window (the one on the other monitor)
+      const me = Math.random().toString(36).slice(2);
+      GM_setValue('mlf_s2_owner', me);                                    // the newest Screen 2 tab is the one used
+      const beat = () => { if (GM_getValue('mlf_s2_owner') === me) GM_setValue('mlf_s2_hb', Date.now()); };
+      beat(); setInterval(beat, 5000);
+      document.title = 'SCREEN 2 - Mars Lead Form';
+      const bar = document.createElement('div');
+      bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#1b7f3a;color:#fff;font:700 14px Arial,sans-serif;padding:8px 14px;text-align:center';
+      bar.textContent = 'SCREEN 2 - keep this tab open on your other screen. Check for Duplicate opens Street View here, with the storm map and AccuLynx records behind it.';
+      document.body.appendChild(bar);
+      let last = [];
+      GM_addValueChangeListener('mlf_s2_open', (n, o, v) => {
+        if (!v || GM_getValue('mlf_s2_owner') !== me) return;
+        if (v.newLead) { last.forEach(t => { try { t.close(); } catch (e) { /* already closed */ } }); last = []; }
+        const back = v.list.filter(x => !x.front), front = v.list.filter(x => x.front);
+        // right after this tab: Street View (in front), then the storm map; records clicked later go at the end, behind
+        back.slice().reverse().forEach(x => last.push(GM_openInTab(x.url, { active: false, insert: v.newLead })));
+        front.forEach(x => last.push(GM_openInTab(x.url, { active: true, insert: true })));
+      });
+      return;
+    }
     const job = GM_getValue('mlf_sheet_job', null);
     if (!job || job.claimed || Date.now() - job.ts > 180000) return;
     GM_setValue('mlf_sheet_job', Object.assign({}, job, { claimed: true }));
