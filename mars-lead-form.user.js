@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.0.0
+// @version      1.1.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -49,6 +49,8 @@
                      new initial appointment, assigned, the new notes posted in the job, task for Mars 1.
                      A SOLD job (Approved / Completed / Invoiced / Closed) gets a NEW lead with the IN number in
                      Cross Reference and the notes.
+       ROOF ONLY  -> when the address is in a roof-only zone, every product other than Roof (ticked or typed in
+                     the "other" box) is flagged OOA in red, Complete asks first, and the notes get an OOA line.
        LEAD TABLE -> the lead is written into that day's Lead Pool row (Morning / Afternoon / Evening), linked
                      to the job: "1000 Carmel Roof" (retail, leftmost free cell) or "1000 Carmel Smith"
                      (insurance, rightmost free cell). A TAKEN cell is used first, then an empty cell, then
@@ -131,6 +133,14 @@
     if (!/\d/.test(bare.replace(/^\s*\d+\s*/, ''))) return street;
     return bare.replace(/\bnorth\b/ig, 'N').replace(/\bsouth\b/ig, 'S').replace(/\beast\b/ig, 'E').replace(/\bwest\b/ig, 'W').replace(/\s+/g, ' ').trim();
   }
+  // products asked for that are NOT roofing (ticked boxes + words typed in the "other" box)
+  const NON_ROOF = [['Gutters', /gutter|guard/i], ['Siding', /siding|hardie|vinyl/i], ['Soffit/Fascia', /sof+it|fa[sc]+ia|\btrim\b/i], ['Windows', /window/i], ['Doors', /\bdoors?\b/i],
+    ['Insulation', /insulation/i], ['Masonry', /masonry|brick|chimney/i], ['Paint', /paint/i], ['Deck/Porch', /deck|porch/i], ['Skylights', /skylight/i]];
+  function ooaProducts(products, otherText) {
+    const out = new Set((products || []).filter(p => !/^(roof|repairs)$/i.test(p)));
+    NON_ROOF.forEach(([name, re]) => { if (re.test(otherText || '')) out.add(name); });
+    return [...out];
+  }
   const oneLine = ad => [shortRoad(ad.street), ad.city, 'IN', ad.zip].filter(Boolean).join(', ');
   // address -> { lat, lon, city, zip, matched }  (US Census first, OpenStreetMap as backup)
   async function geocode(address) {
@@ -208,11 +218,11 @@
     if (has(/murphy/i)) notes.push("Patrick Murphy's area");
     if (has(/work this area|storm/i)) notes.push('inside a storm area on the map');
     let verdict, color;
-    if (has(/shingle/i)) { verdict = 'ROOF / GUTTERS ONLY (shingle roofing)'; color = '#1565c0'; }
+    if (has(/shingle/i)) { verdict = 'ROOF ONLY (shingle roofing)'; color = '#1565c0'; }
     else if (has(/outside/i)) { verdict = 'OUT OF AREA'; color = '#b42318'; }
     else if (has(/indy service area|ok for all|laf branch srvc|murphy srvc/i)) { verdict = 'IN SERVICE AREA - all products'; color = '#1b7f3a'; }
     else { verdict = 'OUT OF AREA (not inside any service area)'; color = '#b42318'; }
-    return { verdict, color, notes, hits };
+    return { verdict, color, notes, hits, roofOnly: /^ROOF ONLY/.test(verdict) };
   }
 
   /* ===================== ACCULYNX SEARCH (duplicates) ===================== */
@@ -400,6 +410,15 @@
       F.products.push(c); prodBox.appendChild(l);
     });
     const prodOther = el('input', inputCss + ';margin-top:4px', null, { placeholder: 'other / details (optional)' });
+    // ROOF ONLY zone: everything but Roof is OOA - shown in red under the service area line, kept up to date
+    const ooaLine = el('div', `margin:2px 0;color:${RED};font-weight:700`);
+    function paintOoa() {
+      const roofOnly = lastCheck && lastCheck.area && lastCheck.area.roofOnly;
+      const list = roofOnly ? ooaProducts(F.products.filter(c => c.checked).map(c => c.value), prodOther.value) : [];
+      ooaLine.textContent = list.length ? 'OOA (roof-only area) for: ' + list.join(', ') : '';
+    }
+    F.products.forEach(c => c.addEventListener('change', paintOoa));
+    prodOther.addEventListener('input', paintOoa);
     F.productOther = prodOther;
     const prodWrap = el('div'); prodWrap.appendChild(prodBox); prodWrap.appendChild(prodOther);
     row('Product Interest', prodWrap);
@@ -459,6 +478,7 @@
       const geoLine = line('Map: finding the address…');
       const areaLine = line('Service area: …');
       const dupLine = line('AccuLynx: searching name, phone, address, email…');
+      checkOut.appendChild(ooaLine);
       const result = { key: checkKey(f), geo: null, area: null, dup: null };
       const geoP = geocode(f.address).then(g => {
         result.geo = g;
@@ -473,7 +493,7 @@
       if (openTabs) geoP.then(g => { if (!g) GM_openInTab('https://www.google.com/maps/search/' + encodeURIComponent(f.address), { active: false, insert: true }); });
       const areaP = geoP.then(async g => {
         if (!g) { areaLine.textContent = 'Service area: needs the map location'; return; }
-        try { result.area = await serviceAreaVerdict(g); areaLine.textContent = ''; areaLine.appendChild(el('b', `color:${result.area.color}`, 'Service area: ' + result.area.verdict)); if (result.area.notes.length) areaLine.appendChild(document.createTextNode('  (' + result.area.notes.join(', ') + ')')); }
+        try { result.area = await serviceAreaVerdict(g); setTimeout(paintOoa, 0); areaLine.textContent = ''; areaLine.appendChild(el('b', `color:${result.area.color}`, 'Service area: ' + result.area.verdict)); if (result.area.notes.length) areaLine.appendChild(document.createTextNode('  (' + result.area.notes.join(', ') + ')')); }
         catch (e) { areaLine.textContent = 'Service area: ' + e.message; areaLine.style.color = RED; }
       });
       const dupP = findDuplicates(f).then(d => {
@@ -505,7 +525,7 @@
       }).catch(e => { dupLine.textContent = 'AccuLynx: ' + e.message; dupLine.style.color = RED; });
       await Promise.all([geoP, areaP, dupP]);
       checkBtn.disabled = false; checkBtn.textContent = 'CHECK FOR DUPLICATE';
-      lastCheck = result;
+      lastCheck = result; paintOoa();
       return result;
     }
     checkBtn.onclick = () => runCheck(true);
@@ -527,7 +547,7 @@
         'Work Schedules',
         'Mrs: ' + L.mrs,
         'Mr: ' + L.mr,
-      ].concat(L.notes ? ['', 'Notes: ' + L.notes] : []).concat(L.crossRef ? ['', 'Existing customer - sold job ' + L.crossRef] : []).map(s => s.trimEnd()).join('\n');
+      ].concat(L.notes ? ['', 'Notes: ' + L.notes] : []).concat(L.ooa && L.ooa.length ? ['', 'OOA (roof-only area) for: ' + L.ooa.join(', ')] : []).concat(L.crossRef ? ['', 'Existing customer - sold job ' + L.crossRef] : []).map(s => s.trimEnd()).join('\n');
     }
     doneBtn.onclick = async () => {
       let f = readForm();
@@ -552,6 +572,8 @@
       if (!chk || chk.key !== checkKey(f) || !chk.dup) { status('Running the duplicate check first…'); chk = await runCheck(false); f = readForm(); }
       if (!chk || !chk.dup) { status('The duplicate check did not finish - press CHECK FOR DUPLICATE and try again.', true); return; }
       if (chk.area && /OUT OF AREA/.test(chk.area.verdict) && !confirm('This address is OUT OF the service area. Enter the lead anyway?')) return;
+      const ooa = chk.area && chk.area.roofOnly ? ooaProducts(f.products, f.productOther) : [];
+      if (ooa.length && !confirm('This address is in a ROOF ONLY area.\nOOA for: ' + ooa.join(', ') + '\n\nEnter the lead anyway? (the OOA line goes in the notes)')) return;
       const plan = chk.forceNew ? { kind: 'new' } : chk.dup.plan;
       const mins = f.workType === 'Insurance' ? CONFIG.INSURANCE_HOURS * 60 : CONFIG.RETAIL_HOURS * 60;
       const end = new Date(start.getTime() + (f.cts ? 60 : mins) * 60e3);
@@ -561,7 +583,7 @@
         start: start.toISOString(), end: end.toISOString(),
         startMin: start.getHours() * 60 + start.getMinutes(), endMin: end.getHours() * 60 + end.getMinutes(),
         apptText: start.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) + ' ' + tf(start) + ' - ' + tf(end),
-        geo: chk.geo, plan, crossRef: plan.kind === 'sold' ? plan.crossRef : '',
+        geo: chk.geo, plan, ooa, crossRef: plan.kind === 'sold' ? plan.crossRef : '',
         trades: [...new Set(f.products.map(p => (CONFIG.PRODUCTS.find(x => x[0] === p) || [])[1]).filter(Boolean))],
       });
       if (!L.trades.length) L.trades = ['Repairs'];
