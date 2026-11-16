@@ -1,0 +1,1361 @@
+// ==UserScript==
+// @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
+// @namespace    amos-exteriors
+// @version      1.0.0
+// @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
+// @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
+// @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
+// @author       Andrew Thomas (Mars 2) with Claude
+// @match        https://web.groupme.com/*
+// @match        https://app.groupme.com/*
+// @match        https://my.acculynx.com/*
+// @match        https://www.google.com/maps/*
+// @match        https://docs.google.com/spreadsheets/d/170b4L23-iIy2D8LH_d2DvcQhulscqtMo6cs7p6byMDY/*
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
+// @grant        GM_xmlhttpRequest
+// @grant        GM_openInTab
+// @connect      my.acculynx.com
+// @connect      docs.google.com
+// @connect      www.google.com
+// @connect      geocoding.geo.census.gov
+// @connect      nominatim.openstreetmap.org
+// @connect      maps.googleapis.com
+// @connect      streetviewpixels-pa.googleapis.com
+// @connect      googleusercontent.com
+// @connect      server.arcgisonline.com
+// @run-at       document-idle
+// @noframes
+// ==/UserScript==
+
+/*
+  HOW THE MARS TEAM USES IT
+  1. In GroupMe click the green "+ LEAD" button (next to CONF). The lead form opens.
+  2. Type First Name, Last Name, Phone, Email and Address, then press the big CHECK FOR DUPLICATE button.
+     It does four things at once:
+       - searches AccuLynx for the same name, phone, address and email,
+       - opens Google Street View of the house in a new tab,
+       - opens Predictive Sales AI (storm map) for the address in a new tab,
+       - checks the address against the Amos Service Area map (the map linked on the Lead Table's
+         SERVICE AREA tab): OK / ROOF ONLY / OUT OF AREA.
+  3. Fill in the rest and press COMPLETE. The form clears for the next lead and the work runs by itself:
+       NEW LEAD   -> AccuLynx Create Lead (notes template, trades, appointment, assigned to Mars 1 /
+                     Needs Confirmed / Mars 2), Save, house + overview pictures, house picture on Location
+                     Info, "Lead Source / Initial Appt" and "Claude" replies, task "Claude Automated Lead" for Mars 1.
+       DUPLICATE  -> (Lead / Prospect / Dead job at the same house) the OLD job is used: re-opened if dead,
+                     new initial appointment, assigned, the new notes posted in the job, task for Mars 1.
+                     A SOLD job (Approved / Completed / Invoiced / Closed) gets a NEW lead with the IN number in
+                     Cross Reference and the notes.
+       LEAD TABLE -> the lead is written into that day's Lead Pool row (Morning / Afternoon / Evening), linked
+                     to the job: "1000 Carmel Roof" (retail, leftmost free cell) or "1000 Carmel Smith"
+                     (insurance, rightmost free cell). A TAKEN cell is used first, then an empty cell, then
+                     DO NOT FILL. White fill, black letters, Arial 9. CTS leads (no time) are not put on the table.
+     The Lead Table opens in its own tab for a few seconds to do the typing (Chrome will not type in a
+     background tab) and closes itself.
+  4. The "Recent" list at the bottom of the form shows how each lead is going and anything left to do by hand.
+*/
+
+(function () {
+  'use strict';
+
+  /* ===================== SETTINGS ===================== */
+  const CONFIG = {
+    LEAD_TABLE_ID: '170b4L23-iIy2D8LH_d2DvcQhulscqtMo6cs7p6byMDY',      // Lead Table 2026
+    SERVICE_TAB: /service area/i,                                    // tab that links the service area map
+    ASSIGN_OPTIONS: ['Mars 1', 'Needs Confirmed', 'Mars 2'],
+    TASK_TITLE: 'Claude Automated Lead',
+    TASK_ASSIGNEE: 'Mars 1 (Resets)',
+    SIGNATURE: 'Claude',
+    RETAIL_HOURS: 2,
+    INSURANCE_HOURS: 1,
+    DEFAULT_EMAIL: 'didnotget@gmail.com',
+    REP_COLS: 'CDEFGHIJKLMNOPQRSTUVW'.split(''),
+    PATRICK_BLUE: '#0000ff',
+    PRODUCTS: [                                                       // form box -> AccuLynx Trade Type
+      ['Roof', 'Roofing'], ['Gutters', 'Gutters'], ['Siding', 'Siding / Soffit / Fascia'],
+      ['Soffit/Fascia', 'Fascia and Soffit'], ['Windows', 'Doors / Windows'], ['Doors', 'Doors / Windows'],
+      ['Insulation', 'Insulation'], ['Masonry', 'Masonry'], ['Repairs', 'Repairs'],
+    ],
+    STYLES: ['Ranch', '1.5 Story', '2 Story', 'Bi-Level', 'Tri-Level', 'Split Level', 'Cape Cod', 'Mobile Home', 'Condo / Townhouse'],
+  };
+  /* ==================================================== */
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const pad2 = n => String(n).padStart(2, '0');
+  const clean = s => String(s || '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
+  const norm = s => (s || '').toLowerCase().replace(/[^a-z]/g, '');
+  const visible = e => e && e.offsetParent !== null;
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  async function waitFor(fn, timeout = 15000, step = 250) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeout) {
+      try { const v = fn(); if (v) return v; } catch (e) { /* keep waiting */ }
+      await sleep(step);
+    }
+    return null;
+  }
+  function gm(opts) {
+    return new Promise((resolve, reject) => GM_xmlhttpRequest(Object.assign({
+      timeout: 30000, onload: resolve,
+      onerror: () => reject(new Error('could not reach ' + ((opts.url.match(/^https?:\/\/([^/]+)/) || [])[1] || 'the site'))),
+      ontimeout: () => reject(new Error('timed out')),
+    }, opts)));
+  }
+  const fmtLead = min => { const h = (Math.floor(min / 60) % 12) || 12; return `${h}${pad2(min % 60)}`; };
+  const clock = min => { const h = (Math.floor(min / 60) % 12) || 12; return `${h}:${pad2(min % 60)} ${min >= 720 ? 'PM' : 'AM'}`; };
+
+  /* ===================== ADDRESS ===================== */
+  const SW = 'street|st|road|rd|drive|dr|lane|ln|avenue|ave|court|ct|circle|cir|way|boulevard|blvd|place|pl|trail|trl|parkway|pkwy|highway|hwy|pike|terrace|ter|loop|run|cove|cv|bend|point|pt|path|square|sq';
+  const titleCase = s => s.split(/(\s+)/).map(w => /^[A-Z][a-z]+[A-Z][a-z]+$/.test(w) ? w : w.toLowerCase().replace(/\b([a-z])/g, c => c.toUpperCase())).join('');
+  function splitAddress(addr) {
+    let a = (addr || '').replace(/\s+/g, ' ').trim();
+    const zips = [...a.matchAll(/\b(\d{5})(?:-\d{4})?\b/g)].filter(m => m.index > 0);
+    const zm = zips.length ? zips[zips.length - 1] : null;
+    const zip = zm ? zm[1] : '';
+    if (zm) a = a.slice(0, zm.index) + a.slice(zm.index + zm[0].length);
+    a = a.replace(/,?\s*\b(Indiana|IN)\b\.?/i, '').replace(/[,\s]+$/, '').trim();
+    let street = a, city = '';
+    if (a.includes(',')) { const p = a.split(',').map(x => x.trim()).filter(Boolean); street = p[0]; city = p[1] || ''; }
+    else { const m = a.match(new RegExp('^(.*?\\b(?:' + SW + '))\\b\\.?\\s+(.+)$', 'i')); if (m) { street = m[1].trim(); city = m[2].trim(); } }
+    const FIX = { indpls: 'Indianapolis', indy: 'Indianapolis', ind: 'Indianapolis', indianapolis: 'Indianapolis' };
+    city = FIX[city.toLowerCase().replace(/\./g, '').trim()] || city;
+    return { street: titleCase(street), city: titleCase(city), zip };
+  }
+  // Google finds numbered county roads only in the short form ("1234 W 100 S")
+  function shortRoad(street) {
+    const bare = street.replace(/\b(?:county\s+road|c(?:o|ty|nty)\.?\s*rd\.?|cr)\s*(?=\d|[NSEW]\b)/ig, ' ').replace(/\s+/g, ' ').trim();
+    if (new RegExp('\\b(?:' + SW + ')\\b', 'i').test(bare)) return street;
+    if (!/\d/.test(bare.replace(/^\s*\d+\s*/, ''))) return street;
+    return bare.replace(/\bnorth\b/ig, 'N').replace(/\bsouth\b/ig, 'S').replace(/\beast\b/ig, 'E').replace(/\bwest\b/ig, 'W').replace(/\s+/g, ' ').trim();
+  }
+  const oneLine = ad => [shortRoad(ad.street), ad.city, 'IN', ad.zip].filter(Boolean).join(', ');
+  // address -> { lat, lon, city, zip, matched }  (US Census first, OpenStreetMap as backup)
+  async function geocode(address) {
+    const ad = splitAddress(address);
+    try {
+      const r = await gm({ method: 'GET', url: 'https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?benchmark=Public_AR_Current&format=json&address=' + encodeURIComponent(oneLine(ad)) });
+      const m = JSON.parse(r.responseText).result.addressMatches[0];
+      if (m) {
+        const c = m.addressComponents || {};
+        return { lat: m.coordinates.y, lon: m.coordinates.x, city: titleCase(c.city || ad.city || ''), zip: c.zip || ad.zip, matched: m.matchedAddress, exact: true };
+      }
+    } catch (e) { /* try the backup */ }
+    const q = new URLSearchParams({ format: 'json', addressdetails: '1', limit: '1', countrycodes: 'us' });
+    if (ad.street) q.set('street', ad.street); if (ad.city) q.set('city', ad.city); if (ad.zip) q.set('postalcode', ad.zip); q.set('state', 'Indiana');
+    const r = await gm({ method: 'GET', url: 'https://nominatim.openstreetmap.org/search?' + q });
+    const h = JSON.parse(r.responseText)[0];
+    if (!h) throw new Error('address not found on the map - check the spelling, city and zip');
+    const a = h.address || {};
+    return { lat: +h.lat, lon: +h.lon, city: titleCase(a.city || a.town || a.village || ad.city || ''), zip: a.postcode || ad.zip, matched: h.display_name, exact: !!a.house_number };
+  }
+
+  /* ===================== SERVICE AREA (map linked on the Lead Table) ===================== */
+  function parseKml(kml) {
+    const shapes = [];
+    const coords = s => s.trim().split(/\s+/).map(c => c.split(',').map(Number)).filter(p => p.length >= 2 && !isNaN(p[0])).map(p => [+p[0].toFixed(4), +p[1].toFixed(4)]);
+    for (const m of kml.matchAll(/<Placemark>([\s\S]*?)<\/Placemark>/g)) {
+      const p = m[1];
+      const name = clean((p.match(/<name>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/name>/) || [])[1]);
+      // the 45-minute drive shapes are only a guide and are huge – not needed for the verdict
+      if (!/outside|service area|srvc|shingle|work this area|storm/i.test(name)) continue;
+      const polys = [];
+      for (const pg of p.matchAll(/<Polygon>([\s\S]*?)<\/Polygon>/g)) {
+        const outer = (pg[1].match(/<outerBoundaryIs>[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>/) || [])[1];
+        if (!outer) continue;
+        const inner = [...pg[1].matchAll(/<innerBoundaryIs>[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>/g)].map(x => coords(x[1]));
+        polys.push({ outer: coords(outer), inner });
+      }
+      for (const ls of p.matchAll(/<LineString>[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>/g)) polys.push({ outer: coords(ls[1]), inner: [] });
+      if (polys.length) shapes.push({ name, polys });
+    }
+    return shapes;
+  }
+  const inRing = (pt, ring) => { let c = false; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const [xi, yi] = ring[i], [xj, yj] = ring[j]; if (((yi > pt[1]) !== (yj > pt[1])) && (pt[0] < (xj - xi) * (pt[1] - yi) / (yj - yi) + xi)) c = !c; } return c; };
+  const inShape = (pt, s) => s.polys.some(p => inRing(pt, p.outer) && !p.inner.some(r => inRing(pt, r)));
+  async function serviceAreaShapes() {
+    const cached = GM_getValue('mlf_area', null);
+    if (cached && cached.shapes && Date.now() - cached.t < 24 * 3600e3) return cached.shapes;
+    // 1) the SERVICE AREA tab on the Lead Table holds the link to the map
+    const base = `https://docs.google.com/spreadsheets/d/${CONFIG.LEAD_TABLE_ID}`;
+    const list = await gm({ method: 'GET', url: `${base}/htmlview?_=${Date.now()}` });
+    const tabs = [...(list.responseText || '').matchAll(/items\.push\(\{name: "([^"]+)"[^}]*?gid: "?(\d+)/g)].map(m => ({ name: m[1], gid: m[2] }));
+    const tab = tabs.find(t => CONFIG.SERVICE_TAB.test(t.name));
+    if (!tab) throw new Error('No SERVICE AREA tab found on the Lead Table (are you signed in to Google in this Chrome?)');
+    const sheet = await gm({ method: 'GET', url: `${base}/htmlview/sheet?headers=true&gid=${tab.gid}&_=${Date.now()}` });
+    const html = (sheet.responseText || '').replace(/&amp;/g, '&');
+    let mid = null;
+    for (const h of html.matchAll(/href="([^"]+)"/g)) { const u = decodeURIComponent(h[1]); const m = u.match(/maps\/d\/[^"]*?[?&]mid=([\w-]+)/); if (m) { mid = m[1]; break; } }
+    if (!mid) throw new Error('The SERVICE AREA tab has no map link');
+    // 2) the map's shapes (KML export)
+    const k = await gm({ method: 'GET', url: `https://www.google.com/maps/d/kml?mid=${mid}&forcekml=1`, timeout: 60000 });
+    if (k.status >= 400 || !/<kml/i.test(k.responseText || '')) throw new Error('Could not open the service area map (HTTP ' + k.status + ')');
+    const shapes = parseKml(k.responseText);
+    if (!shapes.length) throw new Error('The service area map has no shapes I recognize');
+    GM_setValue('mlf_area', { t: Date.now(), shapes });
+    return shapes;
+  }
+  // Order matters: shingle-roof-only zones, then the "Outside" zones, then the service areas. Anything else is out.
+  async function serviceAreaVerdict(geo) {
+    const shapes = await serviceAreaShapes();
+    const pt = [geo.lon, geo.lat];
+    const hits = shapes.filter(s => inShape(pt, s)).map(s => s.name);
+    const has = re => hits.some(n => re.test(n));
+    const notes = [];
+    if (has(/laf/i)) notes.push('Lafayette branch area');
+    if (has(/murphy/i)) notes.push("Patrick Murphy's area");
+    if (has(/work this area|storm/i)) notes.push('inside a storm area on the map');
+    let verdict, color;
+    if (has(/shingle/i)) { verdict = 'ROOF / GUTTERS ONLY (shingle roofing)'; color = '#1565c0'; }
+    else if (has(/outside/i)) { verdict = 'OUT OF AREA'; color = '#b42318'; }
+    else if (has(/indy service area|ok for all|laf branch srvc|murphy srvc/i)) { verdict = 'IN SERVICE AREA - all products'; color = '#1b7f3a'; }
+    else { verdict = 'OUT OF AREA (not inside any service area)'; color = '#b42318'; }
+    return { verdict, color, notes, hits };
+  }
+
+  /* ===================== ACCULYNX SEARCH (duplicates) ===================== */
+  // direct call with the browser's AccuLynx sign-in; if that is refused, an open AccuLynx tab does it for us
+  async function axSearch(query, noContacts) {
+    const path = `/api/Search/GetTypeAheadSearch?noContacts=${noContacts ? 'true' : 'false'}&query=${encodeURIComponent(query)}`;
+    try {
+      const r = await gm({ method: 'GET', url: 'https://my.acculynx.com' + path, headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' } });
+      if (r.status === 200 && /^\s*\{/.test(r.responseText || '')) return JSON.parse(r.responseText).results || [];
+    } catch (e) { /* use the relay */ }
+    const ask = () => new Promise((resolve, reject) => {
+      const id = Date.now() + '-' + Math.random().toString(36).slice(2); let lid = null;
+      const timer = setTimeout(() => { if (lid !== null) GM_removeValueChangeListener(lid); reject(new Error('timeout')); }, 9000);
+      lid = GM_addValueChangeListener('mlf_ax_res', (n, o, v) => { if (!v || v.id !== id) return; clearTimeout(timer); GM_removeValueChangeListener(lid); v.ok ? resolve(v.data) : reject(new Error(v.error)); });
+      GM_setValue('mlf_ax_req', { id, path, ts: Date.now() });
+    });
+    try { return JSON.parse(await ask()).results || []; }
+    catch (e) {
+      // no AccuLynx tab open: open ONE in the background (shared by the 4 searches) and ask again
+      if (!axTab) axTab = (async () => { const t = GM_openInTab('https://my.acculynx.com/dashboard', { active: false, insert: true }); await sleep(9000); return t; })();
+      const tab = await axTab;
+      try { return JSON.parse(await ask()).results || []; }
+      catch (e2) { throw new Error('AccuLynx did not answer - sign in to AccuLynx in this Chrome'); }
+      finally { setTimeout(() => { try { tab.close(); } catch (_) { /* ignore */ } axTab = null; }, 15000); }
+    }
+  }
+  let axTab = null;
+  const SOLD = /^(Approved|Completed|Invoiced|Closed)$/i;
+  const OPEN = /^(Lead|Prospect)$/i;
+  const DEAD = /^(Dead|Canceled|Cancelled)$/i;
+  async function findDuplicates(f) {
+    const ad = splitAddress(f.address);
+    const num = (ad.street.match(/^\d+/) || [''])[0];
+    const word = (ad.street.replace(/^\d+\s+/, '').split(/[\s,]+/).find(w => w.length > 2 && !/^(north|south|east|west)$/i.test(w)) || '');
+    const streetRe = num && word ? new RegExp('^\\s*' + num + '\\s+(?:(?:north|south|east|west|[nsew])\\.?\\s+)?' + word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i') : null;
+    const searches = [
+      ['name', `${f.first} ${f.last}`.trim()],
+      ['phone', f.phone],
+      ['address', num && word ? `${num} ${word}` : ''],
+      ['email', f.email && f.email.toLowerCase() !== CONFIG.DEFAULT_EMAIL ? f.email : ''],
+    ].filter(s => s[1]);
+    const all = new Map();
+    const errors = [];
+    await Promise.all(searches.map(async ([kind, q]) => {
+      try {
+        const res = await axSearch(q, false);
+        for (const x of res) {
+          const blob = JSON.stringify(x).toLowerCase();
+          let ok = false;
+          if (kind === 'name') ok = !!f.last && blob.includes(f.last.toLowerCase()) && (!f.first || blob.includes(f.first.toLowerCase()));
+          if (kind === 'phone') ok = blob.replace(/\D/g, '').includes(f.phone);
+          if (kind === 'address') ok = !!streetRe && streetRe.test(x.FullAddress || '');
+          if (kind === 'email') ok = blob.includes(f.email.toLowerCase());
+          if (!ok) continue;
+          const key = x.Id || x.Name;
+          const cur = all.get(key) || Object.assign({ why: new Set() }, x);
+          cur.why.add(kind); all.set(key, cur);
+        }
+      } catch (e) { errors.push(kind + ': ' + e.message); }
+    }));
+    const matches = [...all.values()].map(x => Object.assign(x, { why: [...x.why] }))
+      .sort((a, b) => b.why.length - a.why.length);
+    // a phone or email match alone is not enough (numbers get reused) – it must also share the name or the address
+    const strong = x => x.why.includes('address') || (x.why.includes('name') && (x.why.includes('phone') || x.why.includes('email')));
+    const jobs = matches.filter(x => x.Type !== 'Contact' && x.Id && strong(x));
+    const sold = jobs.find(x => SOLD.test(x.CurrentMilestone || ''));
+    const open = jobs.filter(x => OPEN.test(x.CurrentMilestone || '')).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
+    const dead = jobs.filter(x => DEAD.test(x.CurrentMilestone || '')).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
+    let plan;
+    if (open || dead) {
+      const j = open || dead;
+      const oldest = jobs.filter(x => !DEAD.test(x.CurrentMilestone || '') || x === j).sort((a, b) => (a.MilestoneStart || '').localeCompare(b.MilestoneStart || ''))[0] || j;
+      const overYear = oldest.MilestoneStart && (Date.now() - new Date(oldest.MilestoneStart)) / 864e5 > 365;
+      plan = { kind: 'revive', jobId: j.Id, name: j.Name, milestone: j.CurrentMilestone, dead: DEAD.test(j.CurrentMilestone || ''), address: j.FullAddress, overYear };
+    } else if (sold) {
+      plan = { kind: 'sold', crossRef: ((sold.Name || '').match(/^IN-\d+/) || [''])[0], name: sold.Name, milestone: sold.CurrentMilestone };
+    } else plan = { kind: 'new' };
+    return { matches, plan, errors };
+  }
+
+  /* ======================================================================================
+     GROUPME: the form
+     ====================================================================================== */
+  if (/groupme\.com$/.test(location.host)) {
+    const NAVY = '#1f3a5f', GREEN = '#1b7f3a', RED = '#b42318', LINE = '#d9dee6', MUTED = '#5f6b7a';
+    const el = (tag, style, text, attrs) => { const e = document.createElement(tag); if (style) e.style.cssText = style; if (text != null) e.textContent = text; Object.entries(attrs || {}).forEach(([k, v]) => e.setAttribute(k, v)); return e; };
+    const inputCss = `width:100%;box-sizing:border-box;border:1px solid ${LINE};border-radius:6px;padding:6px 8px;font:13px Arial,sans-serif;color:#1d2430;background:#fff`;
+
+    const btn = el('button', `position:fixed;top:12px;right:20px;z-index:2147483000;background:${GREEN};color:#fff;border:0;border-radius:12px;padding:3px 10px;font:700 11px Arial,sans-serif;letter-spacing:.04em;box-shadow:0 1px 4px rgba(0,0,0,.25);cursor:pointer`, '+ LEAD', { title: 'Mars lead form' });
+    const panel = el('div', `position:fixed;z-index:2147483001;width:460px;max-width:calc(100vw - 16px);background:#fff;border:1px solid ${LINE};border-radius:10px;box-shadow:0 8px 28px rgba(16,24,40,.25);font:13px Arial,sans-serif;color:#1d2430;display:none;overflow:auto`);
+    const head = el('div', `position:sticky;top:0;z-index:1;padding:10px 14px;background:${GREEN};color:#fff;display:flex;align-items:center;border-radius:10px 10px 0 0`);
+    head.appendChild(el('div', 'flex:1;font-weight:700;font-size:14px', 'Mars Lead Form'));
+    const xBtn = el('button', 'border:0;background:none;color:#fff;font-size:20px;cursor:pointer;line-height:1', '×');
+    head.appendChild(xBtn);
+    const body = el('div', 'padding:12px 14px 14px');
+    panel.appendChild(head); panel.appendChild(body);
+    document.body.appendChild(panel); document.body.appendChild(btn);
+    ['keydown', 'keypress', 'keyup', 'paste'].forEach(ev => panel.addEventListener(ev, e => e.stopPropagation()));
+
+    // sits right next to the CONF button (Lead Slots); top-right corner when CONF is not on the page
+    const dock = () => {
+      const conf = [...document.querySelectorAll('button')].find(b => b !== btn && b.textContent.trim() === 'CONF' && /confirmable/i.test(b.title || ''));
+      if (conf && visible(conf)) {
+        const r = conf.getBoundingClientRect();
+        btn.style.right = 'auto'; btn.style.left = Math.min(innerWidth - btn.offsetWidth - 8, r.right + 6) + 'px';
+        btn.style.top = (r.top + r.height / 2 - btn.offsetHeight / 2) + 'px';
+      } else { btn.style.left = 'auto'; btn.style.right = '20px'; btn.style.top = '12px'; }
+      place();
+    };
+    const place = () => {
+      if (panel.style.display === 'none') return;
+      const r = btn.getBoundingClientRect(), M = 8, pw = Math.min(460, innerWidth - 2 * M);
+      panel.style.left = Math.max(M, Math.min(r.right - pw, innerWidth - pw - M)) + 'px';
+      panel.style.top = Math.min(r.bottom + M, innerHeight - 200) + 'px';
+      panel.style.maxHeight = (innerHeight - parseFloat(panel.style.top) - M) + 'px';
+    };
+    setInterval(dock, 800); addEventListener('resize', dock); setTimeout(dock, 300);
+
+    /* ---------- form fields ---------- */
+    const F = {};
+    // every row goes into `into` (the form body, or one half of a two-column pair)
+    let into = body;
+    const row = (label, input, note) => {
+      const w = el('div', 'margin-bottom:8px');
+      w.appendChild(el('div', `font-size:11px;font-weight:700;color:${MUTED};margin-bottom:2px;text-transform:uppercase;letter-spacing:.03em`, label));
+      w.appendChild(input);
+      if (note) w.appendChild(el('div', `font-size:11px;color:${MUTED};margin-top:2px`, note));
+      into.appendChild(w); return input;
+    };
+    const text = (key, label, ph, type) => (F[key] = row(label, el('input', inputCss, null, { type: type || 'text', placeholder: ph || '' })));
+    const select = (key, label, options, first) => {
+      const s = el('select', inputCss);
+      if (first !== undefined) s.appendChild(el('option', '', first, { value: '' }));
+      options.forEach(o => s.appendChild(el('option', '', o, { value: o })));
+      return (F[key] = row(label, s));
+    };
+    const twoCols = (left, right) => {
+      const w = el('div', 'display:grid;grid-template-columns:1fr 1fr;gap:0 10px'); body.appendChild(w);
+      for (const fn of [left, right]) { into = el('div'); w.appendChild(into); fn(); }
+      into = body;
+    };
+
+    twoCols(() => text('first', 'First Name', ''), () => text('last', 'Last Name', ''));
+    twoCols(() => text('phone', 'Phone Number', '317-555-1234', 'tel'), () => text('email', 'Email', 'blank = ' + CONFIG.DEFAULT_EMAIL, 'email'));
+    text('address', 'Address', '123 Main St, Carmel, IN 46032');
+
+    const checkBtn = el('button', `width:100%;margin:4px 0 8px;padding:12px;border:0;border-radius:8px;background:${NAVY};color:#fff;font:700 15px Arial,sans-serif;letter-spacing:.04em;cursor:pointer`, 'CHECK FOR DUPLICATE');
+    body.appendChild(checkBtn);
+    const checkOut = el('div', 'margin-bottom:10px;font-size:12px');
+    body.appendChild(checkOut);
+
+    // Lead Source: the full list from AccuLynx's Create Lead page
+    const srcWrap = el('div', 'display:flex;gap:6px');
+    const srcSel = el('select', inputCss + ';flex:1');
+    const srcReload = el('button', `border:1px solid ${LINE};background:#fff;border-radius:6px;padding:0 8px;cursor:pointer;font:12px Arial`, '↻', { title: 'Reload the Lead Source list from AccuLynx' });
+    srcWrap.appendChild(srcSel); srcWrap.appendChild(srcReload);
+    F.leadSource = srcSel; row('Lead Source', srcWrap);
+    function fillSources() {
+      const keep = srcSel.value;
+      const list = (GM_getValue('mlf_sources', null) || {}).list || [];
+      srcSel.textContent = '';
+      srcSel.appendChild(el('option', '', list.length ? '- pick -' : '(press ↻ to load from AccuLynx)', { value: '' }));
+      list.forEach(o => srcSel.appendChild(el('option', '', o.text, { value: o.value })));
+      srcSel.value = keep;
+    }
+    fillSources();
+    GM_addValueChangeListener('mlf_sources', () => fillSources());
+    srcReload.onclick = async () => {
+      srcReload.textContent = '…';
+      const t0 = ((GM_getValue('mlf_sources', null) || {}).t) || 0;
+      const tab = GM_openInTab('https://my.acculynx.com/Lead/New#mlfsources', { active: false, insert: true });
+      const ok = await waitFor(() => (((GM_getValue('mlf_sources', null) || {}).t) || 0) > t0, 40000, 500);
+      try { tab.close(); } catch (e) { /* closed itself */ }
+      srcReload.textContent = '↻';
+      if (!ok) status('Could not load the Lead Source list - open AccuLynx (Create Lead) once and press ↻ again.', true);
+    };
+    if (!((GM_getValue('mlf_sources', null) || {}).list || []).length) setTimeout(() => srcReload.onclick(), 1500);
+
+    // Product Interest: tick boxes (only what the customer wants)
+    const prodBox = el('div', 'display:flex;flex-wrap:wrap;gap:4px 10px');
+    F.products = [];
+    CONFIG.PRODUCTS.forEach(([name]) => {
+      const l = el('label', 'display:flex;align-items:center;gap:3px;cursor:pointer;font-size:12px');
+      const c = el('input', '', null, { type: 'checkbox', value: name }); l.appendChild(c); l.appendChild(document.createTextNode(name));
+      F.products.push(c); prodBox.appendChild(l);
+    });
+    const prodOther = el('input', inputCss + ';margin-top:4px', null, { placeholder: 'other / details (optional)' });
+    F.productOther = prodOther;
+    const prodWrap = el('div'); prodWrap.appendChild(prodBox); prodWrap.appendChild(prodOther);
+    row('Product Interest', prodWrap);
+
+    text('material', 'Current Product Material', 'e.g. wood windows, vinyl siding');
+    text('concerns', 'Current Issues/Concerns', '');
+    twoCols(() => text('age', 'Age of Product', 'years'), () => text('built', 'Year of Home Built', ''));
+    twoCols(() => text('purchased', 'Year Home was Purchased', ''), () => { text('style', 'Style of Home', 'pick or type'); F.style.setAttribute('list', 'mlf-styles'); });
+    const dl = el('datalist', '', null, { id: 'mlf-styles' }); CONFIG.STYLES.forEach(s => dl.appendChild(el('option', '', null, { value: s }))); body.appendChild(dl);
+    twoCols(() => text('mrs', 'Work Schedule - Mrs', ''), () => text('mr', 'Work Schedule - Mr', ''));
+    F.notes = row('Notes', el('textarea', inputCss + ';height:60px;resize:vertical'));
+    select('workType', 'Retail or Insurance', ['Retail', 'Insurance']);
+
+    // appointment: date + time, or CTS
+    const apWrap = el('div', 'display:flex;gap:6px;align-items:center');
+    F.apptDate = el('input', inputCss + ';flex:1', null, { type: 'date' });
+    F.apptTime = el('select', inputCss + ';flex:1');
+    F.apptTime.appendChild(el('option', '', '- time -', { value: '' }));
+    for (let m = 8 * 60; m <= 20 * 60; m += 15) F.apptTime.appendChild(el('option', '', clock(m), { value: String(m) }));
+    const ctsL = el('label', 'display:flex;align-items:center;gap:3px;font-size:12px;font-weight:700;white-space:nowrap;cursor:pointer');
+    F.cts = el('input', '', null, { type: 'checkbox' }); ctsL.appendChild(F.cts); ctsL.appendChild(document.createTextNode('CTS'));
+    apWrap.appendChild(F.apptDate); apWrap.appendChild(F.apptTime); apWrap.appendChild(ctsL);
+    row('Appointment date and time', apWrap, 'CTS = call to schedule: 6-7 AM the next work day, not put on the Lead Table.');
+    F.cts.onchange = () => { F.apptDate.disabled = F.apptTime.disabled = F.cts.checked; };
+    select('assign', 'Who is the rep assigned to?', CONFIG.ASSIGN_OPTIONS, '- pick -');
+
+    const doneBtn = el('button', `width:100%;margin-top:6px;padding:12px;border:0;border-radius:8px;background:${GREEN};color:#fff;font:700 15px Arial,sans-serif;letter-spacing:.04em;cursor:pointer`, 'COMPLETE');
+    body.appendChild(doneBtn);
+    const statusEl = el('div', 'margin-top:8px;font-size:12px;min-height:16px');
+    body.appendChild(statusEl);
+    body.appendChild(el('div', `margin-top:10px;font-size:11px;font-weight:700;color:${MUTED};text-transform:uppercase`, 'Recent'));
+    const recentEl = el('div', 'font-size:12px');
+    body.appendChild(recentEl);
+    function status(msg, bad) { statusEl.style.color = bad ? RED : GREEN; statusEl.textContent = msg; }
+
+    function readForm() {
+      const v = k => clean(F[k].value);
+      return {
+        first: titleCase(v('first')), last: titleCase(v('last')), phone: v('phone').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''),
+        email: v('email'), address: v('address'),
+        leadSourceValue: F.leadSource.value, leadSource: F.leadSource.value ? clean(F.leadSource.selectedOptions[0].textContent) : '',
+        products: F.products.filter(c => c.checked).map(c => c.value), productOther: v('productOther'),
+        material: v('material'), concerns: v('concerns'), age: v('age'), built: v('built'), purchased: v('purchased'),
+        style: v('style'), mrs: v('mrs'), mr: v('mr'), notes: F.notes.value.trim(), workType: F.workType.value,
+        apptDate: F.apptDate.value, apptMin: F.apptTime.value === '' ? null : +F.apptTime.value, cts: F.cts.checked, assign: F.assign.value,
+      };
+    }
+    const checkKey = f => [f.first, f.last, f.phone, f.email, f.address].join('|').toLowerCase();
+
+    /* ---------- CHECK FOR DUPLICATE ---------- */
+    let lastCheck = null;
+    async function runCheck(openTabs) {
+      const f = readForm();
+      if (!f.address) { status('Type the address first.', true); return null; }
+      checkBtn.disabled = true; checkBtn.textContent = 'CHECKING…'; checkOut.textContent = '';
+      const line = (label, style) => { const d = el('div', 'margin:2px 0;' + (style || ''), label); checkOut.appendChild(d); return d; };
+      const geoLine = line('Map: finding the address…');
+      const areaLine = line('Service area: …');
+      const dupLine = line('AccuLynx: searching name, phone, address, email…');
+      const result = { key: checkKey(f), geo: null, area: null, dup: null };
+      const geoP = geocode(f.address).then(g => {
+        result.geo = g;
+        geoLine.textContent = 'Map: ' + g.matched + (g.exact ? '' : '  (approximate - check the house number)');
+        if (openTabs) {
+          // 2. Street View of the house   3. Predictive Sales AI storm map
+          GM_openInTab(`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${g.lat},${g.lon}`, { active: false, insert: true });
+          GM_openInTab('https://apps.predictivesalesai.com/admin/weather/map?' + new URLSearchParams({ lat: g.lat, long: g.lon, zoom: '13', exactcoords: 'true', displayaddress: f.address + ' USA' }), { active: false, insert: true });
+        }
+        return g;
+      }).catch(e => { geoLine.textContent = 'Map: ' + e.message; geoLine.style.color = RED; return null; });
+      if (openTabs) geoP.then(g => { if (!g) GM_openInTab('https://www.google.com/maps/search/' + encodeURIComponent(f.address), { active: false, insert: true }); });
+      const areaP = geoP.then(async g => {
+        if (!g) { areaLine.textContent = 'Service area: needs the map location'; return; }
+        try { result.area = await serviceAreaVerdict(g); areaLine.textContent = ''; areaLine.appendChild(el('b', `color:${result.area.color}`, 'Service area: ' + result.area.verdict)); if (result.area.notes.length) areaLine.appendChild(document.createTextNode('  (' + result.area.notes.join(', ') + ')')); }
+        catch (e) { areaLine.textContent = 'Service area: ' + e.message; areaLine.style.color = RED; }
+      });
+      const dupP = findDuplicates(f).then(d => {
+        result.dup = d; dupLine.textContent = '';
+        if (!d.matches.length) dupLine.appendChild(el('b', `color:${GREEN}`, 'AccuLynx: no duplicate found - a NEW lead will be created.'));
+        else {
+          const planTxt = d.plan.kind === 'revive' ? `DUPLICATE - Complete will use the existing job ${d.plan.name} (${d.plan.milestone})${d.plan.dead ? ', re-open it' : ''}, set the new appointment and add the notes there.`
+            : d.plan.kind === 'sold' ? `SOLD customer (${d.plan.name}, ${d.plan.milestone}) - a NEW lead will be created with ${d.plan.crossRef || 'the IN number'} in Cross Reference.`
+            : 'Similar records found, but none is the same house - a NEW lead will be created.';
+          dupLine.appendChild(el('b', `color:${d.plan.kind === 'new' ? NAVY : RED}`, 'AccuLynx: ' + planTxt));
+          const ul = el('div', `margin:4px 0 0 8px;border-left:3px solid ${LINE};padding-left:6px`);
+          d.matches.slice(0, 8).forEach(x => {
+            const r = el('div', 'margin:2px 0');
+            const name = x.Type !== 'Contact' && x.Id ? el('a', 'color:#1155cc;font-weight:700', x.Name || '(job)', { href: 'https://my.acculynx.com/jobs/' + x.Id, target: '_blank' }) : el('b', '', (x.Name || '(contact)') + ' [contact]');
+            r.appendChild(name);
+            r.appendChild(document.createTextNode(` - ${x.CurrentMilestone || ''} ${x.MilestoneStart ? '(' + String(x.MilestoneStart).slice(0, 10) + ')' : ''} · ${x.FullAddress || ''} · same ${x.why.join(', ')}`));
+            ul.appendChild(r);
+          });
+          dupLine.appendChild(ul);
+          if (d.plan.kind === 'revive' && d.plan.overYear) dupLine.appendChild(el('div', `color:${RED}`, 'The original job is over 1 year old - its Lead Source must be changed to the new source (listed as a to-do when finished).'));
+          if (d.plan.kind !== 'new') {
+            const l = el('label', 'display:flex;gap:4px;margin-top:4px;cursor:pointer');
+            const c = el('input', '', null, { type: 'checkbox' }); c.onchange = () => { result.forceNew = c.checked; };
+            l.appendChild(c); l.appendChild(document.createTextNode('Not the same customer - enter it as a NEW lead anyway'));
+            dupLine.appendChild(l);
+          }
+        }
+        if (d.errors.length) dupLine.appendChild(el('div', `color:${RED}`, 'Search problems: ' + d.errors.join('; ')));
+      }).catch(e => { dupLine.textContent = 'AccuLynx: ' + e.message; dupLine.style.color = RED; });
+      await Promise.all([geoP, areaP, dupP]);
+      checkBtn.disabled = false; checkBtn.textContent = 'CHECK FOR DUPLICATE';
+      lastCheck = result;
+      return result;
+    }
+    checkBtn.onclick = () => runCheck(true);
+
+    /* ---------- COMPLETE ---------- */
+    function nextWorkDay() { const d = new Date(); d.setHours(0, 0, 0, 0); do { d.setDate(d.getDate() + 1); } while (d.getDay() === 0); return d; }
+    function notesFor(L) {
+      const prod = [L.products.join(', '), L.productOther].filter(Boolean).join(' - ');
+      return [
+        'Lead Source: ' + L.leadSource,
+        'Product Interest: ' + prod,
+        'Current Product Material: ' + L.material,
+        'Current Issues/Concerns: ' + L.concerns,
+        'Age of Product: ' + L.age,
+        'Year of Home Built: ' + L.built,
+        'Year Home was Purchased: ' + L.purchased,
+        'Style of Home: ' + L.style,
+        'Email: ' + (L.email || ''),
+        'Work Schedules',
+        'Mrs: ' + L.mrs,
+        'Mr: ' + L.mr,
+      ].concat(L.notes ? ['', 'Notes: ' + L.notes] : []).concat(L.crossRef ? ['', 'Existing customer - sold job ' + L.crossRef] : []).map(s => s.trimEnd()).join('\n');
+    }
+    doneBtn.onclick = async () => {
+      let f = readForm();
+      const miss = [];
+      if (!f.first) miss.push('First Name'); if (!f.last) miss.push('Last Name');
+      if (f.phone.length !== 10) miss.push('Phone (10 digits)');
+      if (!f.address) miss.push('Address'); if (!f.leadSourceValue) miss.push('Lead Source');
+      if (!f.products.length && !f.productOther) miss.push('Product Interest');
+      if (!f.cts && (!f.apptDate || f.apptMin === null)) miss.push('Appointment date and time (or CTS)');
+      if (!f.assign) miss.push('Assigned rep');
+      if (miss.length) { status('Missing: ' + miss.join(', '), true); return; }
+      let start;
+      if (f.cts) { start = nextWorkDay(); start.setHours(6, 0, 0, 0); }
+      else {
+        const [y, mo, d] = f.apptDate.split('-').map(Number);
+        start = new Date(y, mo - 1, d, Math.floor(f.apptMin / 60), f.apptMin % 60);
+        if (start.getDay() === 0) { status('Sunday is not a work day - pick another date.', true); return; }
+        if (start < new Date(Date.now() - 3600e3)) { status('That appointment is in the past.', true); return; }
+      }
+      // the duplicate check must match what is in the form now
+      let chk = lastCheck;
+      if (!chk || chk.key !== checkKey(f) || !chk.dup) { status('Running the duplicate check first…'); chk = await runCheck(false); f = readForm(); }
+      if (!chk || !chk.dup) { status('The duplicate check did not finish - press CHECK FOR DUPLICATE and try again.', true); return; }
+      if (chk.area && /OUT OF AREA/.test(chk.area.verdict) && !confirm('This address is OUT OF the service area. Enter the lead anyway?')) return;
+      const plan = chk.forceNew ? { kind: 'new' } : chk.dup.plan;
+      const mins = f.workType === 'Insurance' ? CONFIG.INSURANCE_HOURS * 60 : CONFIG.RETAIL_HOURS * 60;
+      const end = new Date(start.getTime() + (f.cts ? 60 : mins) * 60e3);
+      const tf = d => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+      const L = Object.assign({}, f, {
+        id: 'M' + Date.now(), queuedAt: Date.now(),
+        start: start.toISOString(), end: end.toISOString(),
+        startMin: start.getHours() * 60 + start.getMinutes(), endMin: end.getHours() * 60 + end.getMinutes(),
+        apptText: start.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) + ' ' + tf(start) + ' - ' + tf(end),
+        geo: chk.geo, plan, crossRef: plan.kind === 'sold' ? plan.crossRef : '',
+        trades: [...new Set(f.products.map(p => (CONFIG.PRODUCTS.find(x => x[0] === p) || [])[1]).filter(Boolean))],
+      });
+      if (!L.trades.length) L.trades = ['Repairs'];
+      if (chk.geo) { const ad = splitAddress(f.address); L.city = ad.city || chk.geo.city; L.zip = ad.zip || chk.geo.zip; }
+      L.notesText = notesFor(L);
+      const q = GM_getValue('mlf_queue', {}); q[L.id] = L; GM_setValue('mlf_queue', q);
+      setRecent(L.id, { name: `${L.first} ${L.last}`, msg: 'waiting for AccuLynx…', t: Date.now() });
+      // clear the form for the next lead
+      ['first', 'last', 'phone', 'email', 'address', 'productOther', 'material', 'concerns', 'age', 'built', 'purchased', 'style', 'mrs', 'mr'].forEach(k => { F[k].value = ''; });
+      F.notes.value = ''; F.leadSource.value = ''; F.workType.value = 'Retail'; F.apptDate.value = ''; F.apptTime.value = ''; F.assign.value = '';
+      F.cts.checked = false; F.cts.onchange(); F.products.forEach(c => { c.checked = false; });
+      checkOut.textContent = ''; lastCheck = null;
+      status(`${L.first} ${L.last} sent - ${plan.kind === 'revive' ? 'updating the existing job' : 'creating the lead'} in AccuLynx. You can type the next lead.`);
+      dispatchTick();
+    };
+
+    /* ---------- recent list / progress from the AccuLynx tab ---------- */
+    function setRecent(id, v) { const r = GM_getValue('mlf_recent', {}); r[id] = Object.assign(r[id] || {}, v); const keep = Object.entries(r).sort((a, b) => b[1].t - a[1].t).slice(0, 8); GM_setValue('mlf_recent', Object.fromEntries(keep)); }
+    function paintRecent() {
+      const r = Object.entries(GM_getValue('mlf_recent', {})).sort((a, b) => b[1].t - a[1].t);
+      recentEl.textContent = '';
+      if (!r.length) { recentEl.appendChild(el('div', `color:${MUTED}`, 'nothing yet')); return; }
+      r.forEach(([, v]) => {
+        const d = el('div', `padding:4px 0;border-bottom:1px solid ${LINE}`);
+        d.appendChild(el('b', '', v.name + ': '));
+        d.appendChild(el('span', `color:${v.bad ? RED : v.done ? GREEN : '#1d2430'}`, v.msg));
+        if (v.jobId) { d.appendChild(document.createTextNode(' ')); d.appendChild(el('a', 'color:#1155cc', 'open job', { href: 'https://my.acculynx.com/jobs/' + v.jobId, target: '_blank' })); }
+        recentEl.appendChild(d);
+      });
+    }
+    paintRecent(); GM_addValueChangeListener('mlf_recent', paintRecent);
+
+    /* ---------- one lead at a time goes to AccuLynx ---------- */
+    function dispatchTick() {
+      const q = GM_getValue('mlf_queue', {});
+      const active = GM_getValue('mlf_active', null);
+      const hb = GM_getValue('mlf_hb', 0);
+      if (active && q[active] && Date.now() - hb < 4 * 60e3) return;          // still working
+      if (active && q[active]) {                                               // the AccuLynx tab went quiet
+        setRecent(active, { msg: 'STOPPED in AccuLynx (tab closed or stuck) - check the job and finish by hand.', bad: true, t: Date.now() });
+        delete q[active]; GM_setValue('mlf_queue', q);
+      }
+      GM_deleteValue('mlf_active');
+      const next = Object.keys(q).sort((a, b) => q[a].queuedAt - q[b].queuedAt)[0];
+      if (!next) return;
+      // tab "election": only one GroupMe tab dispatches
+      const me = (window.__mlfTab = window.__mlfTab || Math.random().toString(36).slice(2));
+      const lock = GM_getValue('mlf_dispatch_lock', null);
+      if (lock && lock.tab !== me && Date.now() - lock.t < 15000) return;
+      GM_setValue('mlf_dispatch_lock', { tab: me, t: Date.now() });
+      const L = q[next];
+      GM_setValue('mlf_active', next); GM_setValue('mlf_hb', Date.now());
+      const url = L.plan.kind === 'revive'
+        ? `https://my.acculynx.com/jobs/${L.plan.jobId}${L.plan.dead ? '/settings' : ''}#mlf=${next}`
+        : `https://my.acculynx.com/Lead/New#mlf=${next}`;
+      GM_openInTab(url, { active: false, insert: true });
+      const t0 = GM_getValue('mlf_hb', 0);
+      setTimeout(() => {                                                       // Chrome sometimes blocks background tabs
+        if (GM_getValue('mlf_active') === next && GM_getValue('mlf_hb', 0) === t0) GM_openInTab(url, { active: true, insert: true });
+      }, 20000);
+    }
+    setInterval(dispatchTick, 4000);
+
+    btn.onclick = () => { if (panel.style.display === 'none') { panel.style.display = 'block'; place(); } else panel.style.display = 'none'; };
+    xBtn.onclick = () => { panel.style.display = 'none'; };
+    return;
+  }
+
+  /* ======================================================================================
+     GOOGLE MAPS: hand back the Street View picture of the house (only for a tab this script opened)
+     ====================================================================================== */
+  if (location.host === 'www.google.com' && /^\/maps\/place\//.test(location.pathname)) {
+    (async () => {
+      const req = GM_getValue('mlf_house_req');
+      if (!req || Date.now() - req.t > 60000) return;
+      const img = await waitFor(() => [...document.querySelectorAll('img')].find(i => i.getBoundingClientRect().width > 200 && i.src), 20000, 500);
+      await waitFor(() => /!3d-?\d+\.\d+!4d-?\d+\.\d+/.test(location.href), 12000, 300);
+      const pin = location.href.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/) || location.href.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+      const done = v => GM_setValue('mlf_house_res', Object.assign({ id: req.id, t: Date.now() }, pin ? { lat: +pin[1], lon: +pin[2] } : {}, v));
+      if (!img || !/streetviewpixels-pa\.googleapis\.com|googleusercontent\.com/.test(img.src)) return done({ none: true, why: 'Google has no Street View photo of this address' });
+      try {
+        const big = img.src.replace(/([?&])w=\d+/, '$1w=1600').replace(/([?&])h=\d+/, '$1h=940').replace(/=w\d+-h\d+/, '=w1600-h940');
+        done({ b64: await blobToB64(await fetchBlob(big)) });
+      } catch (e) { done({ none: true, why: 'could not download the Street View photo' }); }
+    })();
+    return;
+  }
+
+  function fetchBlob(url, tries = 2) {
+    return new Promise((res, rej) => GM_xmlhttpRequest({
+      method: 'GET', url, responseType: 'arraybuffer', timeout: 30000,
+      onload: r => (r.status === 200 && r.response && r.response.byteLength > 1000) ? res(new Blob([r.response], { type: 'image/jpeg' })) : rej(new Error('download HTTP ' + r.status)),
+      onerror: () => rej(new Error('download failed')), ontimeout: () => rej(new Error('download timed out')),
+    })).catch(e => tries > 1 ? sleep(1500).then(() => fetchBlob(url, tries - 1)) : Promise.reject(e));
+  }
+  function blobToB64(blob) { return new Promise(r => { const fr = new FileReader(); fr.onload = () => r(String(fr.result).split(',')[1]); fr.readAsDataURL(blob); }); }
+  const b64ToBlob = b64 => { const bin = atob(b64), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return new Blob([u], { type: 'image/jpeg' }); };
+
+  /* ======================================================================================
+     LEAD TABLE: write the lead into the Lead Pool (runs in its own visible tab)
+     ====================================================================================== */
+  if (location.host === 'docs.google.com') {
+    const job = GM_getValue('mlf_sheet_job', null);
+    if (!job || job.claimed || Date.now() - job.ts > 180000) return;
+    GM_setValue('mlf_sheet_job', Object.assign({}, job, { claimed: true }));
+    const reply = x => GM_setValue('mlf_sheet_res', Object.assign({ id: job.id, t: Date.now() }, x));
+
+    const UI = {
+      nameBox: () => document.querySelector('#t-name-box'),
+      editor: () => document.getElementById('waffle-rich-text-editor'),
+      grid: () => document.querySelector('.grid-scrollable-wrapper') || document.querySelector('.grid-container'),
+    };
+    const mouseSeq = (e, x, y) => { const o = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons: 1 }; e.dispatchEvent(new MouseEvent('mousedown', o)); e.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, o, { buttons: 0 }))); e.dispatchEvent(new MouseEvent('click', Object.assign({}, o, { buttons: 0 }))); };
+    const clickEl = e => { const r = e.getBoundingClientRect(); mouseSeq(e, r.x + r.width / 2, r.y + r.height / 2); };
+    const tabEls = () => [...document.querySelectorAll('.docs-sheet-tab')];
+    const tabName = e => { const n = e.querySelector('.docs-sheet-tab-name'); return clean(n ? n.textContent : e.textContent); };
+    const activeTab = () => { const a = document.querySelector('.docs-sheet-active-tab'); return a ? tabName(a) : ''; };
+    async function switchToTab(name) {
+      if (activeTab().includes(name)) return;
+      const t = tabEls().find(e => tabName(e).includes(name));
+      if (!t) throw new Error(`there is no week tab ${name} on the Lead Table yet`);
+      clickEl(t.querySelector('.docs-sheet-tab-name') || t); await sleep(1800);
+      if (!activeTab().includes(name)) throw new Error(`could not open tab ${name}`);
+    }
+    async function goTo(addr) {
+      const nb = UI.nameBox(); nb.focus(); nb.value = addr; nb.dispatchEvent(new Event('input', { bubbles: true }));
+      const k = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
+      nb.dispatchEvent(new KeyboardEvent('keydown', k)); nb.dispatchEvent(new KeyboardEvent('keyup', k));
+      await sleep(650);
+      if (!addr.includes(':') && nb.value.toUpperCase() !== addr) throw new Error(`could not select cell ${addr}`);
+    }
+    function commitClick() {
+      const g = UI.grid(); const r = g.getBoundingClientRect(); const ed = UI.editor().getBoundingClientRect();
+      for (const [fx, fy] of [[0.5, 0.5], [0.3, 0.7], [0.7, 0.35], [0.25, 0.4], [0.6, 0.6]]) {
+        const x = r.x + r.width * fx, y = r.y + r.height * fy;
+        if (x >= ed.left - 6 && x <= ed.right + 6 && y >= ed.top - 6 && y <= ed.bottom + 6) continue;
+        const e = document.elementFromPoint(x, y); if (!e) continue;
+        mouseSeq(e, x, y); return;
+      }
+      mouseSeq(g, r.x + r.width / 2, r.y + r.height / 2);
+    }
+    async function writeText(addr, value) {
+      await goTo(addr);
+      const ed = UI.editor(); ed.focus();
+      const kd = { key: 'a', code: 'KeyA', keyCode: 65, which: 65, bubbles: true, cancelable: true };
+      ed.dispatchEvent(new KeyboardEvent('keydown', kd)); ed.dispatchEvent(new KeyboardEvent('keypress', Object.assign({}, kd, { charCode: 97 })));
+      document.execCommand('selectAll', false, null); document.execCommand('insertText', false, value);
+      ed.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value })); ed.dispatchEvent(new KeyboardEvent('keyup', kd));
+      await sleep(400);
+      const inEdit = ed.getBoundingClientRect().y > -5000;
+      commitClick(); await sleep(650);
+      if (!inEdit) throw new Error(`could not type into ${addr}`);
+    }
+    function paletteCell(name) {
+      const cells = [...document.querySelectorAll('.docs-material-colorpalette')].filter(e => e.offsetParent !== null).flatMap(p => [...p.querySelectorAll('.docs-material-colorpalette-cell')]);
+      return cells.find(c => (c.getAttribute('title') || c.getAttribute('aria-label') || '').toLowerCase() === name) || null;
+    }
+    async function setColor(addr, which, name) {
+      await goTo(addr);
+      const b = document.getElementById(which === 'fill' ? 't-cell-color' : 't-text-color');
+      if (!b) throw new Error('color button not found');
+      clickEl(b); await sleep(500);
+      let c = paletteCell(name); if (!c) { await sleep(600); c = paletteCell(name); }
+      if (!c) { clickEl(b); throw new Error(`color ${name} not found`); }
+      clickEl(c); await sleep(450);
+    }
+    function visibleMenuItems() {
+      const pops = [...document.querySelectorAll('.goog-menu, [role="menu"], [role="listbox"], .docs-toolbar-popup, .goog-popup')].filter(e => e.offsetParent !== null && e.getBoundingClientRect().top > 40);
+      return pops.flatMap(p => [...p.querySelectorAll('.goog-menuitem, [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="button"]')]).filter(m => m.offsetParent !== null);
+    }
+    function menuItemByLabel(labels) {
+      const want = labels.map(l => l.toLowerCase()); const items = visibleMenuItems();
+      const hit = items.find(m => { const a = (m.getAttribute('aria-label') || '').toLowerCase().trim(); return want.some(w => a === w || a.startsWith(w + ' ') || a.startsWith(w + ',')); }) || items.find(m => want.includes(clean(m.textContent).toLowerCase()));
+      if (hit) return hit;
+      const icon = [...document.querySelectorAll('.docs-common-icon[aria-label]')].find(e => e.offsetParent !== null && e.getBoundingClientRect().top > 95 && want.includes(e.getAttribute('aria-label').toLowerCase().trim()));
+      return icon ? (icon.closest('[role="button"], .goog-toolbar-button, .goog-flat-button, .goog-inline-block') || icon.parentElement || icon) : null;
+    }
+    async function pickFromToolbar(id, labels) {
+      const b = document.getElementById(id); if (!b) throw new Error('toolbar ' + id);
+      clickEl(b); await sleep(600);
+      let it = menuItemByLabel(labels); if (!it) { await sleep(600); it = menuItemByLabel(labels); }
+      if (!it) { clickEl(b); await sleep(200); throw new Error('menu ' + labels[0]); }
+      clickEl(it); await sleep(450);
+    }
+    async function baseFormat(addr) {
+      const failed = [];
+      for (const [n, fn] of [
+        ['font', () => pickFromToolbar('docs-font-family', ['Arial'])],
+        ['size', async () => { const i = document.querySelector('#fontSizeSelect input'); if (!i) throw new Error('size'); i.focus(); i.value = '9'; i.dispatchEvent(new Event('input', { bubbles: true })); const k = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }; i.dispatchEvent(new KeyboardEvent('keydown', k)); i.dispatchEvent(new KeyboardEvent('keyup', k)); i.dispatchEvent(new Event('change', { bubbles: true })); await sleep(400); }],
+        ['wrap', () => pickFromToolbar('t-textwrap', ['Wrap'])],
+        ['center', () => pickFromToolbar('t-align', ['Center'])],
+        ['middle', () => pickFromToolbar('t-valign', ['Middle'])],
+      ]) { try { await goTo(addr); await fn(); } catch (e) { failed.push(n); } }
+      return failed;
+    }
+    const decode = s => String(s || '').replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, '').replace(/&nbsp;|&#160;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+    const normHex = c => { c = String(c || '').trim().toLowerCase(); const m = c.match(/^#([0-9a-f]{3})$/); return m ? '#' + m[1].split('').map(x => x + x).join('') : c; };
+    const colLetter = i => { let s = ''; i += 1; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
+    async function readCells(gid) {
+      const html = await (await fetch(`/spreadsheets/d/${CONFIG.LEAD_TABLE_ID}/htmlview/sheet?headers=true&gid=${gid}&_=${Date.now()}`, { credentials: 'same-origin', cache: 'no-store' })).text();
+      const styles = {}; html.replace(/\.(s\d+)\s*\{([^}]*)\}/g, (m, cls, b) => { styles[cls] = normHex((b.match(/background-color:\s*([^;]+)/i) || [])[1]); return m; });
+      const vis = []; const he = html.indexOf('</thead>');
+      (he > 0 ? html.slice(0, he) : '').replace(/<th\b[^>]*id="[^"]*C(\d+)"[^>]*>/gi, (m, n) => { vis.push(+n); return m; });
+      const L = pos => colLetter(vis[pos] !== undefined ? vis[pos] : pos);
+      const cells = {}; const occ = {};
+      for (const tr of html.split(/<tr\b/i).slice(1)) {
+        const th = tr.match(/<th\b[^>]*>([\s\S]*?)<\/th>/i); if (!th) continue;
+        const rn = parseInt(decode(th[1]).trim(), 10); if (!rn || rn > 100) continue;
+        let pos = 0; const re = /<td\b([^>]*)>([\s\S]*?)<\/td>/gi; let t;
+        while ((t = re.exec(tr))) {
+          if (/freezebar/i.test(t[1])) continue;
+          while (occ[`${rn}:${pos}`]) pos += 1;
+          const cs = +((t[1].match(/colspan="?(\d+)/i) || [])[1] || 1), rs = +((t[1].match(/rowspan="?(\d+)/i) || [])[1] || 1);
+          for (let r = 0; r < rs; r += 1) for (let c = 0; c < cs; c += 1) occ[`${rn + r}:${pos + c}`] = 1;
+          const cls = ((t[1].match(/class="([^"]*)"/i) || [])[1] || '').match(/\bs\d+\b/);
+          const jid = (t[2].match(/jobs\/([0-9a-f]{8}-[0-9a-f-]{27})/i) || [])[1];
+          cells[`${L(pos)}${rn}`] = { t: clean(decode(t[2])), bg: cls ? styles[cls[0]] || '' : '', job: jid ? jid.toLowerCase() : '' };
+          pos += cs;
+        }
+      }
+      return cells;
+    }
+    function findBlocks(cells) {
+      const blocks = [];
+      for (let r = 3; r <= 100; r += 1) {
+        const n = CONFIG.REP_COLS.filter(c => /^\*?\s*[A-Z][a-z]+\s+[A-Z][A-Za-z'-]+/.test((cells[`${c}${r}`] || {}).t || '')).length;
+        if (n >= 15) { blocks.push({ names: r, slots: [r + 1, r + 2, r + 3, r + 4], pool: [r - 5, r - 4, r - 3] }); r += 6; }
+      }
+      return blocks.slice(0, 7);
+    }
+
+    (async () => {
+      try {
+        if (!(await waitFor(() => UI.nameBox() && document.querySelector('.docs-sheet-tab') && UI.editor(), 30000, 500))) throw new Error('the Lead Table did not finish loading');
+        await sleep(1500);
+        await switchToTab(job.tab);
+        const gid = (location.hash.match(/gid=(\d+)/) || [])[1];
+        if (!gid) throw new Error('could not read the tab id');
+        const cells = await readCells(gid);
+        const block = findBlocks(cells)[job.dayIndex];
+        if (!block) throw new Error(`could not find the ${job.dayLabel} block on ${job.tab}`);
+        const cell = a => cells[a] || { t: '', bg: '', job: '' };
+        // already on the table (a re-run)? then leave it
+        const rows = [...block.pool, ...block.slots];
+        const there = rows.flatMap(r => CONFIG.REP_COLS.map(c => `${c}${r}`)).find(a => cell(a).job && cell(a).job === job.jobId.toLowerCase());
+        if (there) { reply({ ok: true, cell: there, already: true }); return; }
+        const poolRow = block.pool[job.slot];
+        let cols = CONFIG.REP_COLS.filter(c => cell(`${c}${poolRow}`).bg !== CONFIG.PATRICK_BLUE);
+        if (job.insurance) cols = cols.slice().reverse();                   // insurance fills from the far right
+        const free = re => cols.map(c => `${c}${poolRow}`).find(a => re.test(cell(a).t));
+        const target = free(/^TAKEN$/i) || free(/^$/) || free(/^DO NOT FILL$/i);
+        if (!target) throw new Error(`no free Lead Pool cell in the ${job.slotName} row on ${job.dayLabel}`);
+        const before = cell(target).t;
+        await writeText(target, `=HYPERLINK("${job.link}","${job.text.replace(/"/g, "'")}")`);
+        const problems = [];
+        try { await setColor(target, 'fill', 'white'); } catch (e) { problems.push('fill color'); }
+        try { await setColor(target, 'text', 'black'); } catch (e) { problems.push('text color'); }
+        problems.push(...await baseFormat(target));
+        await sleep(2500);
+        const after = (await readCells(gid))[target] || {};
+        if (clean(after.t) !== clean(job.text)) throw new Error(`wrote ${target} but it reads "${after.t || ''}" - please check it`);
+        reply({ ok: true, cell: target, replaced: before, problems });
+      } catch (e) { reply({ ok: false, error: e.message }); }
+    })();
+    return;
+  }
+
+  /* ======================================================================================
+     ACCULYNX
+     ====================================================================================== */
+  if (location.host !== 'my.acculynx.com') return;
+
+  // relay: GroupMe asks, this tab searches with its own sign-in
+  GM_addValueChangeListener('mlf_ax_req', async (n, o, req) => {
+    if (!req || !req.id || Date.now() - req.ts > 20000) return;
+    try { const r = await fetch(req.path, { credentials: 'same-origin', headers: { Accept: 'application/json' } }); GM_setValue('mlf_ax_res', { id: req.id, ok: r.ok, data: await r.text(), error: r.ok ? '' : 'HTTP ' + r.status }); }
+    catch (e) { GM_setValue('mlf_ax_res', { id: req.id, ok: false, error: String(e) }); }
+  });
+
+  function fieldByLabel(labelText) {
+    const lab = [...document.querySelectorAll('label')].find(l => visible(l) && l.innerText.replace('*', '').trim().toLowerCase() === labelText.toLowerCase());
+    if (!lab) return null;
+    let c = lab.parentElement;
+    for (let k = 0; k < 4 && c; k++) { const f = c.querySelector('input:not([type=checkbox]):not([type=radio]),select,textarea,button'); if (f) return f; c = c.parentElement; }
+    return null;
+  }
+
+  // Lead Source list: saved from every Create Lead page (and fetched on request with #mlfsources)
+  if (/^\/lead\/new/i.test(location.pathname)) {
+    (async () => {
+      const ls = await waitFor(() => { const s = fieldByLabel('Lead Source'); return s && s.options && s.options.length > 3 ? s : null; }, 30000, 500);
+      if (ls) GM_setValue('mlf_sources', { t: Date.now(), list: [...ls.options].filter(o => o.value && clean(o.text)).map(o => ({ value: o.value, text: clean(o.text) })) });
+      if (/mlfsources/.test(location.hash)) { await sleep(500); window.close(); }
+    })();
+  }
+
+  function setValue(e, value) {
+    const proto = e.tagName === 'SELECT' ? HTMLSelectElement.prototype : e.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(e, value);
+    e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  async function typeInto(e, value) { e.focus(); e.click(); setValue(e, ''); for (const ch of value) { setValue(e, e.value + ch); e.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ch })); await sleep(20); } }
+  function selectByText(sel, t) { const o = sel && [...sel.options].find(x => x.text.trim().toLowerCase() === t.toLowerCase()); if (!o) return false; setValue(sel, o.value); return true; }
+  const clickText = (t, root = document, tags = 'button,a,li,span,div,label') => [...root.querySelectorAll(tags)].find(e => visible(e) && e.innerText && e.innerText.trim() === t);
+  const fire = e => { for (const t of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) e.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true })); };
+  function showNote(msg, warn) {
+    let n = document.getElementById('mlf-note');
+    if (!n) { n = document.createElement('div'); n.id = 'mlf-note'; n.style.cssText = 'position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:2147483647;padding:6px 14px;border-radius:6px;font:600 13px Arial;color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.3);cursor:pointer;max-width:80vw'; n.title = 'click to close'; n.onclick = () => n.remove(); document.body.appendChild(n); }
+    n.style.background = warn ? '#b45309' : '#1b7f3a'; n.textContent = 'Mars Lead Form: ' + msg;
+  }
+
+  /* ---------- the lead this tab is working on ---------- */
+  const hashId = (location.hash.match(/mlf=(M\d+)/) || [])[1];
+  if (hashId) { try { sessionStorage.setItem('mlfWorker', hashId); } catch (e) { /* ignore */ } }
+  const myLead = () => { let id = null; try { id = sessionStorage.getItem('mlfWorker'); } catch (e) { /* ignore */ } return id && id === GM_getValue('mlf_active') ? id : null; };
+  const stKey = id => 'mlf_state_' + id;
+  const getL = id => (GM_getValue('mlf_queue', {}) || {})[id];
+  const saveL = L => { const q = GM_getValue('mlf_queue', {}); q[L.id] = L; GM_setValue('mlf_queue', q); };
+  function progress(L, msg, extra) {
+    const r = GM_getValue('mlf_recent', {}); r[L.id] = Object.assign(r[L.id] || { name: L.first + ' ' + L.last }, { msg, t: Date.now(), jobId: L.jobId || (r[L.id] || {}).jobId }, extra || {});
+    GM_setValue('mlf_recent', r); GM_setValue('mlf_hb', Date.now());
+    console.log('[MarsLeadForm]', L.first, L.last, msg);
+  }
+  const problem = (L, p) => { L.problems = (L.problems || []).concat(p); saveL(L); };
+  const go = (L, step, path) => { L.step = step; saveL(L); GM_setValue('mlf_hb', Date.now()); location.href = '/jobs/' + L.jobId + (path || ''); };
+
+  /* ---------- NEW LEAD: Create Lead form ---------- */
+  async function fillCreateLead(L) {
+    const cancel = await waitFor(() => /Finish previous lead/i.test(document.body.innerText) && clickText('Cancel', document, 'button,a'), 4000);
+    if (cancel) { cancel.click(); await sleep(1500); }
+    const f = fieldByLabel;
+    if (!(await waitFor(() => f('First Name'), 30000))) throw new Error('Create Lead page did not load');
+    await typeInto(f('First Name'), L.first);
+    await typeInto(f('Last Name'), L.last);
+    await typeInto(f('Phone'), L.phone);
+    await typeInto(f('Email'), L.email || CONFIG.DEFAULT_EMAIL);
+    const ad = splitAddress(L.address);
+    setValue(f('City'), ad.city || L.city || 'Indianapolis');
+    selectByText(f('State'), 'IN');
+    setValue(f('Zip'), ad.zip || L.zip || '');
+    const street = f('Street');
+    await typeInto(street, ad.street);
+    street.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ' }));
+    const want = (ad.city || L.city || '').toLowerCase(), num = (ad.street.match(/^\d+/) || [''])[0];
+    const pick = await waitFor(() => {
+      const items = [...document.querySelectorAll('li.refinement-controls__search-result, .refinement-controls__search-results li')].filter(visible);
+      return items.find(i => i.textContent.trim().startsWith(num) && want && i.textContent.toLowerCase().includes(want) && /,\s*IN,/i.test(i.textContent)) ||
+             (!want && items.find(i => i.textContent.trim().startsWith(num) && /,\s*IN,/i.test(i.textContent)));
+    }, 5000, 300);
+    if (pick) { fire(pick); await sleep(1500); }
+    street.dispatchEvent(new Event('blur', { bubbles: true })); street.blur(); await sleep(800);
+    if (!street.value) { await typeInto(street, ad.street); street.blur(); await sleep(800); }
+    if (!f('Zip').value && L.zip) setValue(f('Zip'), L.zip);
+    if (!street.value) throw new Error('the street did not stick in the Create Lead form');
+
+    selectByText(f('Job Category'), 'Residential');
+    if (!selectByText(f('Work Type'), L.workType)) problem(L, 'Work Type "' + L.workType + '" not picked - set it by hand');
+    const ls = f('Lead Source');
+    const opt = [...ls.options].find(o => o.value === L.leadSourceValue) || [...ls.options].find(o => clean(o.text) === L.leadSource);
+    if (!opt) throw new Error('Lead Source "' + L.leadSource + '" is not in AccuLynx\'s list');
+    setValue(ls, opt.value);
+
+    f('Trade Type').click(); await sleep(500);
+    for (const t of L.trades) {
+      const labs = [...document.querySelectorAll('label')].filter(visible);
+      const lab = labs.find(l => l.innerText.trim() === t) || labs.find(l => l.innerText.trim().toLowerCase().startsWith(t.split(/[ /]/)[0].toLowerCase()) && !/^service/i.test(l.innerText.trim()));
+      if (lab) lab.click(); else problem(L, 'Trade "' + t + '" not found - tick it by hand');
+      await sleep(200);
+    }
+    document.body.click(); await sleep(2500);
+
+    if (L.crossRef) {
+      const crLab = [...document.querySelectorAll('label')].find(l => visible(l) && /^cross reference/i.test(l.innerText.trim()));
+      let cr = null; for (let p = crLab; p && !cr; p = p.parentElement) cr = p.querySelector('input');
+      if (cr) await typeInto(cr, L.crossRef + (cr.value ? ' | ' + cr.value : '')); else problem(L, 'Cross Reference box not found - add ' + L.crossRef + ' by hand');
+    }
+
+    const asg = f('Assign to');
+    await typeInto(asg, L.assign.slice(0, 10)); await sleep(900);
+    const isWho = t => t === L.assign || t.startsWith(L.assign + ' ') || t.startsWith(L.assign + '(');
+    const who = await waitFor(() => [...document.querySelectorAll('li,div,span,a')].filter(e => visible(e) && e.innerText && isWho(e.innerText.trim()))
+      .sort((x, y) => x.querySelectorAll('*').length - y.querySelectorAll('*').length)[0], 6000);
+    if (who) { fire(who); await sleep(700); }
+    if (!who || !isWho(clean(asg.value))) problem(L, 'Could not pick "' + L.assign + '" in Assign to - check it');
+
+    setValue(f('Notes'), L.notesText);
+    const start = new Date(L.start), end = new Date(L.end);
+    let c = f('Appointment Date'), fp = null;
+    for (let k = 0; k < 6 && c && !fp; k++) { fp = c._flatpickr || null; c = c.parentElement; }
+    if (fp) { fp.setDate(start, true); await sleep(800); }
+    if (!f('Appointment Date').value) throw new Error('the appointment date did not take');
+    const hhmm = d => pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    setValue(f('Start Time'), hhmm(start)); f('Start Time').dispatchEvent(new Event('blur', { bubbles: true })); await sleep(500);
+    setValue(f('End Time'), hhmm(end)); f('End Time').dispatchEvent(new Event('blur', { bubbles: true })); await sleep(500);
+    if (f('Start Time').value !== hhmm(start) || f('End Time').value !== hhmm(end)) problem(L, 'Appointment times did not take - check them');
+    setValue(f('Notes'), L.notesText);
+  }
+
+  /* ---------- photos (same as Enter Lead): house + overview, house on Location Info ---------- */
+  async function getHousePhoto(L) {
+    const ad = splitAddress(L.address);
+    GM_deleteValue('mlf_house_res'); GM_setValue('mlf_house_req', { id: L.id, t: Date.now() });
+    const tab = GM_openInTab('https://www.google.com/maps/place/' + encodeURIComponent(oneLine({ street: ad.street, city: ad.city || L.city, zip: ad.zip || L.zip })), { active: false, insert: true });
+    const r = await waitFor(() => { const v = GM_getValue('mlf_house_res'); return v && v.id === L.id ? v : null; }, 30000, 500);
+    try { tab.close(); } catch (e) { /* ignore */ }
+    GM_deleteValue('mlf_house_req');
+    if (r && r.lat) L.pin = { lat: r.lat, lon: r.lon };
+    if (!r) return { none: true, why: 'Google Maps did not answer' };
+    if (r.none) return { none: true, why: r.why };
+    return { blob: b64ToBlob(r.b64) };
+  }
+  async function getOverviewPhoto(L) {
+    const p = L.pin || (L.geo ? { lat: L.geo.lat, lon: L.geo.lon } : null);
+    if (!p) throw new Error('no map location');
+    const bbox = [p.lon - 0.0008, p.lat - 0.0005, p.lon + 0.0008, p.lat + 0.0005].join(',');
+    return fetchBlob('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox=' + bbox + '&bboxSR=4326&imageSR=3857&size=1000,750&format=jpg&f=image', 2);
+  }
+  async function uploadPhotos(files, retry = 1) {
+    const upBtn = () => [...document.querySelectorAll('button')].find(b => visible(b) && b.textContent.trim() === 'Upload');
+    await waitFor(() => !upBtn(), 30000, 500); await sleep(800);
+    const add = await waitFor(() => clickText('Add Photos', document, 'button'));
+    if (!add) throw new Error('Add Photos button not found');
+    add.click(); await sleep(1200);
+    const input = await waitFor(() => { const all = document.querySelectorAll('input[type=file]'); return all[all.length - 1]; });
+    if (!input) throw new Error('photo file input not found');
+    const dt = new DataTransfer(); files.forEach(fl => dt.items.add(fl));
+    input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(2500);
+    const up = await waitFor(() => { const b = upBtn(); return b && !b.disabled ? b : null; }, 15000);
+    if (!up) {
+      const cancel = [...document.querySelectorAll('button,a')].filter(b => visible(b) && b.textContent.trim() === 'Cancel').pop();
+      if (cancel) { cancel.click(); await sleep(1500); }
+      if (retry > 0) return uploadPhotos(files, retry - 1);
+      throw new Error('Upload button not found');
+    }
+    up.click();
+    if (!await waitFor(() => /successfully uploaded/i.test(document.body.innerText) || !upBtn(), 60000)) throw new Error('upload did not confirm');
+    await waitFor(() => !upBtn(), 30000, 500);
+  }
+  async function setLocationPhoto() {
+    const sec = () => [...document.querySelectorAll('section.editable')].find(x => /Initial Appt/.test(x.innerText));
+    const hasImg = () => { const s = sec(); return !!(s && s.querySelector('img')); };
+    for (let attempt = 1; attempt <= 3 && !hasImg(); attempt++) {
+      try {
+        const s = await waitFor(sec, 15000);
+        const pencil = s && s.querySelector('span.edit');
+        if (!pencil) throw new Error('Location Info pencil not found');
+        pencil.scrollIntoView({ block: 'center' }); pencil.click();
+        if (!await waitFor(() => /Edit Location Information/i.test(document.body.innerText), 8000)) throw new Error('location editor did not open');
+        const addImg = await waitFor(() => clickText('Add Image', document, 'button'), 8000);
+        if (!addImg) throw new Error('Add Image button not found');
+        addImg.click();
+        await waitFor(() => /Select Files/i.test(document.body.innerText), 8000);
+        const photosTab = [...document.querySelectorAll('button.file-picker-tabs__tab')].find(e => visible(e) && e.textContent.trim() === 'Photos');
+        if (photosTab && !photosTab.classList.contains('current')) { photosTab.click(); await sleep(800); }
+        const thumb = await waitFor(() => {
+          const items = [...document.querySelectorAll('li.attachment')];
+          if (items[0]) items[0].scrollIntoView({ block: 'center' });
+          for (const re of [/_house\.jpg/i, /_overview\.jpg/i]) {
+            const hit = items.find(li => { try { return re.test(decodeURIComponent(li.outerHTML)); } catch (e) { return re.test(li.outerHTML); } });
+            if (hit) return hit.querySelector('button') || hit;
+          }
+          return null;
+        }, 20000, 400);
+        if (!thumb) throw new Error('house photo not in the picker');
+        thumb.click(); await sleep(600);
+        let pk = document.querySelector('button.file-picker-tabs__tab');
+        while (pk && ![...pk.querySelectorAll('button')].some(b => visible(b) && b.innerText.trim() === 'Save')) pk = pk.parentElement;
+        const save1 = pk && [...pk.querySelectorAll('button')].filter(x => visible(x) && x.innerText.trim() === 'Save').pop();
+        if (!save1) throw new Error('picker Save not found');
+        save1.click(); await sleep(2000);
+        const save2 = [...document.querySelectorAll('button')].filter(x => visible(x) && x.innerText.trim() === 'Save').pop();
+        if (save2) save2.click();
+        await waitFor(() => /Location information saved/i.test(document.body.innerText) || hasImg(), 10000);
+        await sleep(1500);
+      } catch (e) {
+        const cancel = [...document.querySelectorAll('button,a')].filter(x => visible(x) && x.innerText.trim() === 'Cancel').pop();
+        if (cancel) { cancel.click(); await sleep(1000); }
+        if (attempt === 3) throw e;
+      }
+    }
+    if (!hasImg()) throw new Error('house picture not set on Location Info');
+  }
+
+  /* ---------- comments / task ---------- */
+  async function replyInThread(text) {
+    const ed = await waitFor(() => [...document.querySelectorAll('[contenteditable="true"]')].find(visible));
+    if (!ed) throw new Error('reply box not found');
+    ed.focus();
+    if (ed.ckeditorInstance) ed.ckeditorInstance.setData(text.split('\n').map(l => '<p>' + (l.replace(/&/g, '&amp;').replace(/</g, '&lt;') || '&nbsp;') + '</p>').join(''));
+    else document.execCommand('insertText', false, text);
+    await sleep(600);
+    const send = await waitFor(() => { const b = document.querySelector('.job-communications-reply-box__send-button'); return b && visible(b) && !b.disabled ? b : null; }, 5000);
+    if (!send) throw new Error('Send button not available on the reply box');
+    const before = document.body.innerText.length;
+    send.click();
+    const ok = await waitFor(() => /submitted successfully/i.test(document.body.innerText) || (ed.ckeditorInstance && ed.ckeditorInstance.getData() === '' && document.body.innerText.length > before), 15000);
+    if (!ok) throw new Error('reply did not post');
+    await sleep(1500);
+  }
+  // open the notes thread: the one whose preview shows one of the marks, else the oldest (last) thread in the list
+  async function openNotesThread(marks, fallbackOldest) {
+    const row = await waitFor(() => {
+      const c = [...document.querySelectorAll('div,li')].filter(e => visible(e) && e.children.length > 0 && e.innerText.length < 500 && marks.some(m => e.innerText.includes(m)));
+      return c.sort((a, b) => a.innerText.length - b.innerText.length)[0] || null;
+    }, fallbackOldest ? 12000 : 30000);
+    if (row) { row.click(); await sleep(2500); return true; }
+    if (!fallbackOldest) return false;
+    const rows = [...document.querySelectorAll('[class*="communication"] li, [class*="message-list"] li, [class*="thread"] li')].filter(e => visible(e) && e.innerText.length > 10 && e.innerText.length < 500);
+    const oldest = rows[rows.length - 1];
+    if (!oldest) return false;
+    oldest.click(); await sleep(2500); return true;
+  }
+  async function createTask(title, assignee) {
+    const txt = e => (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim();
+    const openBtn = await waitFor(() => [...document.querySelectorAll('button,a,span,div')].find(e => visible(e) && e.children.length < 3 && /^\+?\s*Create Task$/i.test(txt(e))), 20000);
+    if (!openBtn) throw new Error('"Create Task" button not found on the Overview page');
+    openBtn.scrollIntoView({ block: 'center' }); openBtn.click(); await sleep(1500);
+    const dlg = () => { const ta = [...document.querySelectorAll('textarea')].filter(visible)[0]; if (!ta) return null; let d = ta; for (let k = 0; k < 12 && d; k++, d = d.parentElement) if (/Assign To/i.test(txt(d)) && [...d.querySelectorAll('button')].some(b => /^Create$/i.test(txt(b)))) return d; return null; };
+    const win = await waitFor(dlg, 15000);
+    if (!win) throw new Error('task window did not open');
+    const chips = () => [...(win.querySelector('.ti-tags') || win).querySelectorAll('.ti-tag')];
+    for (const ch of chips()) if (!txt(ch).includes(assignee)) { const x = ch.querySelector('.ti-icon-close') || ch.querySelector('.ti-actions i:last-child'); if (x) { x.click(); await sleep(400); } }
+    if (!chips().some(ch => txt(ch).includes(assignee))) {
+      const inp = win.querySelector('input.ti-new-tag-input');
+      if (!inp) throw new Error('"Find a person" box not found');
+      inp.focus(); inp.click(); setValue(inp, assignee.split(' ').slice(0, 2).join(' ')); await sleep(1200);
+      const opt = await waitFor(() => [...win.querySelectorAll('.ti-autocomplete li.ti-item')].find(e => visible(e) && txt(e).includes(assignee)), 8000);
+      if (!opt) throw new Error('"' + assignee + '" not in the Find-a-person list');
+      for (const t of ['mouseenter', 'mouseover', 'mousedown', 'mouseup']) { try { opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true })); } catch (_) { /* ignore */ } }
+      opt.click(); await sleep(700);
+      if (!chips().some(ch => txt(ch).includes(assignee))) { inp.focus(); inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true })); await sleep(700); }
+    }
+    if (!chips().some(ch => txt(ch).includes(assignee)) || chips().length !== 1) throw new Error('Assign To is not only ' + assignee);
+    const desc = win.querySelector('textarea');
+    desc.focus(); setValue(desc, title); desc.dispatchEvent(new Event('blur', { bubbles: true })); await sleep(500);
+    const save = [...win.querySelectorAll('button')].filter(visible).find(b => /^create$/i.test(txt(b)) && !b.disabled);
+    if (!save) throw new Error('task Create button not found');
+    save.click();
+    if (!await waitFor(() => !dlg(), 15000)) throw new Error('task was not confirmed');
+    await sleep(1200);
+  }
+
+  /* ---------- DUPLICATE: re-open, appointment, rep (same steps as the Dead Lead Reviver) ---------- */
+  const bodyText = () => document.body.innerText || '';
+  async function reopenJob() {
+    const link = await waitFor(() => [...document.querySelectorAll('a.nav-link')].find(a => /Re-?\s?Open Job/i.test(a.textContent)), 20000);
+    if (!link) throw new Error('Re-Open Job link not found on Settings');
+    link.click();
+    const b = await waitFor(() => document.querySelector('button[data-test="reopen-job__reopen"]'), 10000);
+    if (!b) throw new Error('Re-Open Job button not found');
+    await sleep(500); b.click();
+    await waitFor(() => /re-?opened successfully/i.test(bodyText()), 25000);
+    await sleep(3000);
+  }
+  async function setInitialAppt(L) {
+    const ready = await waitFor(() => [...document.querySelectorAll('dt')].find(e => e.textContent.trim() === 'Initial Appt:') && /Milestones/.test(bodyText()), 25000);
+    if (!ready) throw new Error('Overview did not load');
+    await sleep(3000);
+    const start = new Date(L.start);
+    const label = MONTHS[start.getMonth()] + ' ' + start.getDate() + ', ' + start.getFullYear();
+    const sec = document.querySelector('#location-view') && document.querySelector('#location-view').closest('section.editable');
+    const pencil = sec && sec.querySelector('span.edit');
+    if (!pencil) throw new Error('Location Info edit pencil not found');
+    pencil.click();
+    const dsel = '.edit-location-modal__section--appointment-date-selector';
+    const wrap = await waitFor(() => document.querySelector(dsel), 15000);
+    if (!wrap) throw new Error('Edit Location panel did not open');
+    await sleep(800);
+    const dateInput = wrap.querySelector('input');
+    try {
+      const clr = wrap.querySelector('button.form-v3-select__clear');
+      if (dateInput.value && clr) { clr.click(); await sleep(700); }
+      for (const cal of [...document.querySelectorAll('.flatpickr-calendar')]) {
+        const yrEl = cal.querySelector('.cur-year'), moEl = cal.querySelector('select.flatpickr-monthDropdown-months');
+        if (!yrEl || !moEl) continue;
+        const diff = (parseInt(yrEl.value, 10) * 12 + parseInt(moEl.value, 10)) - (start.getFullYear() * 12 + start.getMonth());
+        const nav = cal.querySelector(diff > 0 ? '.flatpickr-prev-month' : '.flatpickr-next-month');
+        for (let i = 0; i < Math.abs(diff); i++) nav.click();
+        await sleep(400);
+        const dayEl = [...cal.querySelectorAll('.flatpickr-day')].find(x => x.getAttribute('aria-label') === label);
+        if (!dayEl) continue;
+        ['mousedown', 'mouseup', 'click'].forEach(t => dayEl.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true })));
+        await sleep(800);
+        if (dateInput.value) break;
+      }
+      if (!dateInput.value) throw new Error('the appointment date did not take');
+      const sels = await waitFor(() => { const s = [...document.querySelectorAll('.appointment-times-selector select')]; return s.length === 2 && !s[0].disabled ? s : null; }, 8000);
+      if (!sels) throw new Error('Start/End time boxes did not unlock');
+      const setSel = (sel, min) => { if (![...sel.options].some(o => o.value === String(min))) throw new Error('time ' + clock(min) + ' not offered'); setValue(sel, String(min)); };
+      setSel(sels[0], L.startMin); await sleep(400);
+      setSel(sels[1], L.endMin); await sleep(400);
+      const saveBtn = [...document.querySelectorAll('button')].find(b => visible(b) && b.textContent.trim() === 'Save');
+      if (!saveBtn) throw new Error('Save button not found');
+      saveBtn.click();
+      await waitFor(() => !document.querySelector(dsel), 15000);
+      await sleep(5000);
+    } catch (e) {
+      const cancel = [...document.querySelectorAll('button')].find(b => visible(b) && b.textContent.trim() === 'Cancel' && /text-blue/.test(b.className));
+      if (cancel) cancel.click();
+      throw e;
+    }
+  }
+  async function assignRep(want) {
+    const label = () => { const e = document.querySelector('.job-rep-wrapper .rep-name'); return e ? clean(e.textContent) : ''; };
+    const isWho = t => t === want || t.startsWith(want + ' ') || t.startsWith(want + '(');
+    if (isWho(label())) return;
+    const wrap = document.querySelector('.job-rep-wrapper');
+    const toggle = wrap && wrap.querySelector('button.no-focus-outline');
+    if (!toggle) throw new Error('assigned-rep box not found');
+    toggle.click();
+    const box = await waitFor(() => document.querySelector('.primary-rep-details'), 6000);
+    if (!box) throw new Error('rep details did not open');
+    let top = box, pencil = null;
+    for (let i = 0; i < 5 && top && !pencil; i++) { pencil = top.querySelector('span.edit'); top = top.parentElement; }
+    if (!pencil) throw new Error('rep edit pencil not found');
+    pencil.click();
+    const sel = await waitFor(() => { const lab = [...document.querySelectorAll('label')].find(l => /Company Representative/.test(l.textContent)); let c = lab; for (let i = 0; i < 4 && c && !c.querySelector('select'); i++) c = c.parentElement; return c && c.querySelector('select'); }, 10000);
+    if (!sel) throw new Error('Company Representative box did not open');
+    const opt = [...sel.options].find(o => isWho(clean(o.text)));
+    if (!opt) throw new Error('"' + want + '" is not in the representative list');
+    setValue(sel, opt.value); await sleep(600);
+    const saveBtn = [...document.querySelectorAll('button')].find(b => visible(b) && b.textContent.trim() === 'Save');
+    if (!saveBtn) throw new Error('Save button not found for the representative');
+    saveBtn.click();
+    if (!(await waitFor(() => isWho(label()), 12000))) throw new Error('rep still shows "' + label() + '"');
+  }
+
+  /* ---------- Lead Table hand-off ---------- */
+  function sheetJobFor(L) {
+    if (L.cts) return { skip: 'CTS lead - not put on the Lead Table' };
+    const s = new Date(L.start);
+    if (s.getDay() === 0) return { skip: 'Sunday - not on the Lead Table' };
+    const mon = new Date(s.getFullYear(), s.getMonth(), s.getDate() - ((s.getDay() + 6) % 7));
+    const sun = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + 6);
+    const f = x => `${x.getMonth() + 1}.${x.getDate()}.${String(x.getFullYear()).slice(-2)}`;
+    const slot = L.startMin < 720 ? 0 : (L.startMin < 930 ? 1 : 2);
+    const city = L.city || splitAddress(L.address).city || '';
+    const place = /indianapolis/i.test(city) && L.zip ? L.zip : (city || L.zip || '');
+    const ins = L.workType === 'Insurance';
+    const prod = L.products.length ? L.products.join(' & ') : (L.productOther || 'Repairs');
+    return {
+      id: L.id, ts: Date.now(), tab: `${f(mon)}-${f(sun)}`, dayIndex: Math.round((new Date(s.getFullYear(), s.getMonth(), s.getDate()) - mon) / 864e5),
+      dayLabel: s.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' }), slot, slotName: ['Morning', 'Afternoon', 'Evening'][slot],
+      insurance: ins, jobId: L.jobId, link: 'https://my.acculynx.com/jobs/' + L.jobId,
+      text: `${fmtLead(L.startMin)} ${place} ${ins ? L.last : prod}`.replace(/\s+/g, ' ').trim(),
+    };
+  }
+  // the Lead Table opens in its own VISIBLE tab (Chrome will not type into a background tab), types, reports back, closes
+  async function toLeadTable(job) {
+    GM_deleteValue('mlf_sheet_res');
+    GM_setValue('mlf_sheet_job', job);
+    const tab = GM_openInTab(`https://docs.google.com/spreadsheets/d/${CONFIG.LEAD_TABLE_ID}/edit`, { active: true, insert: true, setParent: true });
+    const hb = setInterval(() => GM_setValue('mlf_hb', Date.now()), 20000);
+    const res = await waitFor(() => { const v = GM_getValue('mlf_sheet_res', null); return v && v.id === job.id ? v : null; }, 180000, 1000);
+    clearInterval(hb);
+    await sleep(1500);
+    try { tab.close(); } catch (e) { /* already closed */ }
+    return res || { ok: false, error: 'the Lead Table tab did not finish' };
+  }
+
+  /* ---------- the step machine ---------- */
+  let busy = false;
+  async function run() {
+    if (busy) return;
+    const id = myLead(); if (!id) return;
+    const L = getL(id); if (!L) return;
+    busy = true;
+    try {
+      GM_setValue('mlf_hb', Date.now());
+      if (!L.step) L.step = L.plan.kind === 'revive' ? (L.plan.dead ? 'reopen' : 'appt') : 'form';
+      if (L.plan.kind === 'revive' && !L.jobId) { L.jobId = L.plan.jobId; saveL(L); }
+      const onJob = () => { const m = location.pathname.match(/^\/jobs\/([0-9a-f-]{36})/i); return m && L.jobId && m[1].toLowerCase() === L.jobId.toLowerCase(); };
+      const overview = () => /^\/jobs\/[0-9a-f-]{36}\/?$/i.test(location.pathname);
+
+      if (L.step === 'form') {
+        if (!/^\/lead\/new/i.test(location.pathname)) return;
+        progress(L, 'filling Create Lead…');
+        await fillCreateLead(L);
+        L.step = 'saved'; L.savedAt = Date.now(); saveL(L);
+        const save = clickText('Save', document, 'button');
+        if (!save || save.disabled) throw new Error('Save is greyed out - a required field is missing on Create Lead');
+        save.click();
+        progress(L, 'saved, waiting for the job page…');
+        return;
+      }
+      if (L.step === 'saved') {
+        const m = location.pathname.match(/^\/jobs\/([0-9a-f-]{36})/i);
+        if (!m) return;
+        await sleep(2500);
+        if (!bodyText().toLowerCase().includes(L.last.toLowerCase())) return;
+        L.jobId = m[1]; saveL(L);
+        progress(L, 'lead created - adding pictures…');
+        return go(L, 'photos', '/jobphotos');
+      }
+      if (!onJob()) return;
+
+      if (L.step === 'photos') {
+        if (!/\/jobphotos/.test(location.pathname)) return go(L, 'photos', '/jobphotos');
+        await sleep(2500);
+        let house = null, okAny = false;
+        try { house = await getHousePhoto(L); if (house.none) problem(L, 'House picture skipped - ' + house.why); } catch (e) { problem(L, 'House picture: ' + e.message); }
+        try { const ov = await getOverviewPhoto(L); await uploadPhotos([new File([ov], L.last + '_overview.jpg', { type: 'image/jpeg' })]); okAny = true; } catch (e) { problem(L, 'Overview picture: ' + e.message); }
+        if (house && house.blob) { try { await sleep(1500); await uploadPhotos([new File([house.blob], L.last + '_house.jpg', { type: 'image/jpeg' })]); okAny = true; } catch (e) { problem(L, 'House picture: ' + e.message); } }
+        saveL(L);
+        return okAny ? go(L, 'location', '') : go(L, 'comments', '/communications');
+      }
+      if (L.step === 'location') {
+        if (!overview()) return go(L, 'location', '');
+        progress(L, 'setting the house picture…');
+        try { await setLocationPhoto(); } catch (e) { problem(L, e.message + ' - set the Location Info picture by hand'); }
+        return go(L, 'comments', '/communications');
+      }
+      if (L.step === 'reopen') {
+        if (!/\/settings/.test(location.pathname)) return go(L, 'reopen', '/settings');
+        progress(L, 're-opening the old job…');
+        await reopenJob();
+        return go(L, 'appt', '');
+      }
+      if (L.step === 'appt') {
+        if (!overview()) return go(L, 'appt', '');
+        if (/Dead Milestone/.test(bodyText()) || /has been .Canceled./.test(bodyText())) {
+          L.deadTries = (L.deadTries || 0) + 1; saveL(L);
+          if (L.deadTries > 4) throw new Error('the old job still shows dead after Re-Open');
+          await sleep(8000); location.reload(); return;
+        }
+        progress(L, 'setting the new initial appointment…');
+        await setInitialAppt(L);
+        return go(L, 'rep', '');
+      }
+      if (L.step === 'rep') {
+        if (!overview()) return go(L, 'rep', '');
+        await sleep(2500);
+        progress(L, 'assigning ' + L.assign + '…');
+        try { await assignRep(L.assign); } catch (e) { problem(L, 'Assign to ' + L.assign + ': ' + e.message + ' - do it by hand'); }
+        return go(L, 'comments', '/communications');
+      }
+      if (L.step === 'comments') {
+        if (!/\/communications/.test(location.pathname)) return go(L, 'comments', '/communications');
+        if (L.commentsDone) return go(L, 'task', '');
+        progress(L, 'posting the notes…');
+        await sleep(2500);
+        const src = 'Lead Source: ' + L.leadSource;
+        try {
+          if (L.plan.kind === 'revive') {
+            if (!(await openNotesThread(['Lead Source:', 'Initial Appt'], true))) throw new Error('no message thread found to post the notes in');
+            await replyInThread('NEW LEAD INFO (' + new Date().toLocaleDateString('en-US') + ')\n' + L.notesText + '\n\nInitial Appt: ' + L.apptText);
+          } else {
+            if (!(await openNotesThread([src, L.notesText.split('\n')[1] || src], false))) throw new Error('notes message not found in Communications');
+            await replyInThread(src + '\nInitial Appt: ' + L.apptText);
+          }
+          await replyInThread(CONFIG.SIGNATURE);
+        } catch (e) { problem(L, 'Comments: ' + e.message + ' - post the notes / "Claude" by hand'); }
+        L.commentsDone = true; saveL(L);
+        return go(L, 'task', '');
+      }
+      if (L.step === 'task') {
+        if (!overview()) return go(L, 'task', '');
+        if (!L.taskDone) {
+          L.taskDone = true; saveL(L);                                       // one try only - never two tasks
+          progress(L, 'creating the task for Mars 1…');
+          await sleep(2500);
+          try { await createTask(CONFIG.TASK_TITLE, CONFIG.TASK_ASSIGNEE); } catch (e) { problem(L, 'Task not created (' + e.message + ') - create "' + CONFIG.TASK_TITLE + '" for Mars 1 by hand'); }
+        }
+        L.step = 'sheet'; saveL(L);
+      }
+      if (L.step === 'sheet') {
+        const job = sheetJobFor(L);
+        if (job.skip) L.sheetNote = job.skip;
+        else {
+          progress(L, 'writing the Lead Table (' + job.dayLabel + ' ' + job.slotName + ')…');
+          const r = await toLeadTable(job);
+          if (r.ok) L.sheetNote = r.already ? 'already on the Lead Table (' + r.cell + ')' : `Lead Table ${job.dayLabel} ${job.slotName} cell ${r.cell}` + (r.replaced ? ` (was "${r.replaced}")` : '') + (r.problems && r.problems.length ? ' - formatting not set: ' + r.problems.join(', ') : '');
+          else problem(L, 'Lead Table: ' + r.error + ` - add "${job.text}" to ${job.dayLabel} ${job.slotName} Lead Pool by hand`);
+        }
+        L.step = 'done'; saveL(L);
+      }
+      if (L.step === 'done') {
+        if (L.plan.kind === 'revive' && L.plan.overYear) problem(L, 'Original job is over 1 year old - change its Lead Source to "' + L.leadSource + '"');
+        const probs = L.problems || [];
+        const what = L.plan.kind === 'revive' ? 'existing job updated' : 'entered';
+        progress(L, `${what}. ${L.sheetNote || ''}${probs.length ? ' | TO DO: ' + probs.join(' · ') : ''}`, { done: !probs.length, bad: probs.length > 0, jobId: L.jobId });
+        const q = GM_getValue('mlf_queue', {}); delete q[L.id]; GM_setValue('mlf_queue', q);
+        GM_deleteValue('mlf_active');
+        showNote(`${L.first} ${L.last} ${what}.` + (probs.length ? ' TO DO: ' + probs.join(' · ') : ' You can close this tab.'), probs.length > 0);
+      }
+    } catch (e) {
+      progress(L, 'STOPPED: ' + e.message + ' - finish this lead by hand.', { bad: true });
+      showNote('STOPPED: ' + e.message, true);
+      const q = GM_getValue('mlf_queue', {}); delete q[L.id]; GM_setValue('mlf_queue', q);
+      GM_deleteValue('mlf_active');
+    } finally { busy = false; }
+  }
+  run();
+  let lastHref = location.href;
+  setInterval(() => { if (location.href !== lastHref) { lastHref = location.href; run(); } }, 1500);
+})();

@@ -29,6 +29,7 @@ Tampermonkey checks about once a day. To force it: click the Tampermonkey icon, 
 | Storm Report Button | Storm report and nearby insurance jobs from one click on a job | [Install](https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/storm-report-button.user.js) |
 | Field Marketing Leads | Today's Field Marketing leads report and GroupMe snapshot image | [Install](https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/field-marketing-leads.user.js) |
 | Mars 3 NAX2 Follow-Up | "Mars 3" button: moves the appointment, posts the comment, texts the customer | [Install](https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars3-nax2-followup.user.js) |
+| Mars Lead Form | Green "+ LEAD" button next to CONF in GroupMe: in-house lead form with Check for Duplicate (AccuLynx, Street View, storm map, service area); Complete enters the lead in AccuLynx and the Lead Table | [Install](https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js) |
 
 ## Rules for this page
 
