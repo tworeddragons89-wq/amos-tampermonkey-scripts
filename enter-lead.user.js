@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.7.7
+// @version      5.7.8
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply "entering" to the lead message, and comment "entered" when finished.
@@ -14,6 +14,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
+// @grant        unsafeWindow
 // @connect      groupme.com
 // @connect      m.groupme.com
 // @connect      i.groupme.com
@@ -99,7 +100,7 @@
     const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
     const phoneRe = /(\(?\d{3}\)?[\s.\-]{0,3}\d{3}[\s.\-]{0,3}\d{4})/;
     const phoneLine = lines.findIndex(l => phoneRe.test(l));
-    const streetLine = lines.findIndex(l => /^\d+\s+[a-z0-9]/i.test(l) && !phoneRe.test(l));
+    const streetLine = lines.findIndex(l => (/^\d+\s+[a-z0-9]/i.test(l) || /^p\.?\s?o\.?\s*box\s*\d+/i.test(l)) && !phoneRe.test(l));   // a PO Box counts as the street line
     if (phoneLine < 0 && streetLine > 0 && lines.length >= 3 && /\b(indiana|in)\b\.?\s*\d{5}|\b4\d{4}\b/i.test(text))
       return { noPhone: true, sender: repName, raw: text };                       // name + address but NO phone (phone only on the lead sheet)
     if (phoneLine < 0 || streetLine < 0) return parseDictatedLead(text, repName);   // JW Isaac style: one spoken sentence
@@ -114,7 +115,7 @@
       if (phoneRe.test(l) || looksLikeDate || (PRODUCT_RE.test(l) && l.split(/\s+/).length <= 5)) continue;
       nameLine = l; break;
     }
-    let nmRaw = nameLine, nameExtra = '';
+    let nmRaw = nameLine.replace(/^\s*cts\b[\s:.\-]*/i, ''), nameExtra = '';          // "CTS Belinda Morris" → the CTS (call to schedule) tag is not part of the name
     if (/\//.test(nmRaw)) {
       const [left, ...rest] = nmRaw.split('/'); const right = rest.join('/').trim();
       // "Anna/ Tom Reed" = two people sharing the last name → "Anna and Tom Reed"
@@ -138,6 +139,7 @@
     if (fixLine) { const p = fixLine.trim().split(/\s+/); lead.first = titleCase(p.slice(0, -1).join(' ')); lead.last = titleCase(p[p.length - 1]); }
     lead.phone = lines[phoneLine].match(phoneRe)[1].replace(/\D/g, '');
     let addr = lines[streetLine];
+    { const pob = addr.match(/^p\.?\s?o\.?\s*box\s*(\d+)/i); if (pob) addr = 'PO Box ' + pob[1]; }            // "PO Box 232-She will give address on phone" → "PO Box 232"
     const next = lines[streetLine + 1] || '';
     if (next && !phoneRe.test(next) && (/(indiana|\bin\b|\d{5})/i.test(next) || KNOWN_CITIES.includes(next.toLowerCase().replace(/[.,]/g, '').trim()))) addr += ', ' + next;   // a bare city line ("Logansport")
     const zipLine = (lines[streetLine + 2] || '').trim();                     // the rep put the zip on a line of its own
@@ -164,7 +166,7 @@
       if (/^[a-z]{1,3}\d{0,2}$/i.test(l)) return;                                   // rep codes like "Zl1"
       if (new RegExp('^(' + MONTHS.map(m => m.slice(0, 3)).join('|') + ')[a-z]*\\.?\\s+\\d', 'i').test(l) && l.length < 40) return;
       if (PRODUCT_RE.test(l) && l.length < 60) {                                    // "130 sofit" → "sofit";  "Soffit/fascia Est" → "Soffit / Fascia"
-        const clean = l.replace(/^\d{1,4}(:\d{2})?\s*(am|pm|a|p)?\s+/i, '').replace(/\b(?:est(?:imates?)?|quotes?|inspections?)\b\.?/ig, ' ').replace(/\s+/g, ' ').trim();
+        const clean = l.replace(/^\d{1,4}(:\d{2})?\s*(am|pm|a|p)?\s+/i, '').replace(/\b(?:est(?:imates?)?|quotes?|inspections?)\b\.?/ig, ' ').replace(/\b(?:original|old|existing|current)\b/ig, ' ').replace(/(^|[\/,+&]\s*)\d{1,3}\s+(?=[A-Za-z])/g, '$1').replace(/\s+/g, ' ').trim();
         const parts = clean.split(/\s*(?:\/|,|\+|&|\band\b)\s*/i).map(x => x.trim()).filter(Boolean);
         lead.products.push(parts.length > 1 && parts.every(x => x.length < 25) ? parts.map(titleCase).join(' / ') : (clean || l)); return; }
       const em = l.match(/[A-Za-z0-9._%+-]*[A-Za-z][A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/);
@@ -504,25 +506,30 @@
   // "entering" as a REPLY to the lead message, so the team (and the audit) can see which lead is being entered.
   // GroupMe only draws its hover toolbar for a real mouse, but focusing the message's inner box shows the same "Reply to message" button.
   async function gmReplyTo(msgId, text) {
+    const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;     // build events in the PAGE's own context so GroupMe's code reacts to them
     const node = document.querySelector('[data-message-id="' + msgId + '"]');
+    const trace = [];
     if (node) {
       node.scrollIntoView({ block: 'center' }); await sleep(400);
       const cand = [...node.querySelectorAll('[tabindex]'), node, ...node.querySelectorAll('div')].slice(0, 15);
       let reply = null;
       for (const e of cand) {
         try { e.focus({ preventScroll: true }); } catch (_) {}
-        e.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-        reply = await waitFor(() => { const b = node.querySelector('button[aria-label="Reply to message"]'); return b && b.offsetParent ? b : null; }, 700);
+        try { e.dispatchEvent(new W.FocusEvent('focusin', { bubbles: true })); } catch (_) {}
+        reply = await waitFor(() => { const b = node.querySelector('button[aria-label="Reply to message"]'); return b && b.offsetParent ? b : null; }, 900);
+        trace.push(e.tagName + (e.getAttribute('tabindex') !== null ? '[' + e.getAttribute('tabindex') + ']' : '') + (reply ? '+' : '-'));
         if (reply) break;
       }
       if (reply) {
         reply.click();
         // GroupMe shows a "Cancel reply to <name>" chip above the box once the reply is armed – only then type and send
         const armed = await waitFor(() => document.querySelector('button[aria-label^="Cancel reply to"]'), 3000);
-        if (armed) { if (await gmSend(text)) return true; }
+        trace.push(armed ? 'armed' : 'not-armed');
+        if (armed) { if (await gmSend(text)) return true; trace.push('send-failed'); }
       }
-    }
-    log('Could not reply to the lead message – posting "' + text + '" without a reply; reply to it by hand', true);
+    } else trace.push('no-node');
+    console.log('[EnterLead] reply trace', trace.join(' '));
+    log('Could not reply to the lead message (' + trace.join(' ') + ') – posting "' + text + '" without a reply; reply to it by hand', true);
     return gmSend(text);
   }
   async function openChat(chatId) {
@@ -948,9 +955,10 @@
       const inp = win.querySelector('input.ti-new-tag-input');
       if (!inp) throw new Error('"Find a person" box not found');
       inp.focus(); inp.click(); setValue(inp, assignee.split(' ').slice(0, 2).join(' ')); await sleep(1200);
-      const opt = await waitFor(() => [...document.querySelectorAll('.ti-autocomplete li,.ti-item,[role=option],li')].find(e => visible(e) && txt(e).includes(assignee) && !e.closest('.ti-tags .ti-tag')), 8000);
+      const opt = await waitFor(() => [...win.querySelectorAll('.ti-autocomplete li.ti-item')].find(e => visible(e) && txt(e).includes(assignee)), 8000);
       if (!opt) throw new Error('"' + assignee + '" not in the Find-a-person list');
-      opt.click(); await sleep(700);
+      for (const t of ['mouseenter', 'mouseover', 'mousedown', 'mouseup', 'click']) opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })); await sleep(700);
+      if (!chips().some(c => txt(c).includes(assignee))) { inp.focus(); inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true })); await sleep(700); }
     }
     if (!chips().some(c => txt(c).includes(assignee)) || chips().length !== 1) throw new Error('Assign To is not only ' + assignee);
     // Description = the task title
