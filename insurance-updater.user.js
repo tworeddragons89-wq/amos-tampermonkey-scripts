@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Insurance Updater (AccuLynx)
 // @namespace    amos-exteriors
-// @version      1.3.6
+// @version      1.3.7
 // @description  Fills blank Insurance and Adjuster fields on Inspection/Insurance leads from the carrier's scope, and lists everything it can't decide for a person to review.
 // @match        https://my.acculynx.com/*
 // @grant        GM_xmlhttpRequest
@@ -312,9 +312,14 @@ const AIU_CORE = (env) => {
     const all = msgs.map((m) => (m.subject ? m.subject + ' ' : '') + m.text).join('\n');
     const f = { notes: [] };
     if (/\b(?:claim\s+(?:was\s+|got\s+|has\s+been\s+)?denied|denied\s+(?:the\s+)?(?:claim|roof|by\s+(?:the\s+)?insurance)|insurance\s+denied|denial\s+letter|claim\s+denial)\b/i.test(all)) { f.denied = true; f.notes.push('messages mention a denied claim'); }
-    if (/full(?:y)?\s+approv/i.test(all)) { f.fullApproval = true; f.notes.push('messages mention a full approval (check Claim Approved)'); }
+    if (/(?<!\bnot\s)(?<!\bnever\s)(?<!\bun)full(?:y)?\s+approv/i.test(all)) { f.fullApproval = true; f.notes.push('messages mention a full approval (check Claim Approved)'); }
     if (/\bmet\s+(?:with\s+)?(?:the\s+)?adjuster|adjuster\s+(?:meeting|appointment)\s+(?:went|was|is\s+done)|had\s+(?:an?\s+)?adjuster\s+meeting/i.test(all)) { f.metAdjuster = true; f.notes.push('messages mention meeting the adjuster (check Met Adjuster)'); }
-    if (/\bpartial(?:ly)?\s+(?:approv|pay)|approved\s+(?:only\s+)?(?:the\s+)?(?:gutters|siding|windows|front|back)/i.test(all)) f.notes.push('messages mention a partial approval');
+    if (/\bpartial(?:ly)?\s+(?:approv|pay)|approved\s+(?:only\s+)?(?:the\s+)?(?:gutters|siding|windows|front|back)/i.test(all)) { f.partial = true; f.notes.push('messages mention a partial approval'); }
+    /* v1.3.7: a lead marked Dead with the reason Do Not Call is never touched. AccuLynx writes "Job marked as Dead by <name>. Reason: <reason>" as a Job Message. */
+    const DNC = /do\s*not\s*call|don'?t\s*call|\bdnc\b/i;
+    const deadReasons = [...all.matchAll(/Job marked as Dead by[^\n]*?Reason:\s*([^\n]+)/gi)].map((x) => x[1].trim());
+    if (deadReasons.length) { f.deadReason = deadReasons[deadReasons.length - 1].slice(0, 60); if (deadReasons.some((r) => DNC.test(r))) f.doNotCall = true; }
+    else if (DNC.test(msgs.filter((m) => /Job Message/i.test(m.type || '')).map((m) => (m.subject || '') + ' ' + m.text).join('\n'))) f.doNotCall = true; /* no structured reason: be careful and look at the internal notes only (e-mails carry "Do Not Call Registry" boilerplate) */
     if (/\bretail\b/i.test(all)) f.retail = true;
     const cm = all.match(/claim\s*(?:#|number|no\.?)\s*(?:is\s*)?:?\s*([A-Z0-9][A-Z0-9-]{5,20})\b/i); if (cm && /\d/.test(cm[1])) { f.claimInMsg = cm[1].toUpperCase(); }
     const lab = [...all.matchAll(/insurance(?:\s+(?:company|carrier|provider|co\.?))?\s*(?:is|:|-|=)\s*([A-Za-z][A-Za-z .&'-]{2,40})/gi)].map((x) => x[1]);
@@ -337,6 +342,8 @@ const AIU_CORE = (env) => {
     const res = { id: row.id, name: row.name, link: 'https://my.acculynx.com/jobs/' + row.id, set: [], flags: [], ins: null, adj: null, scope: null };
     const ms = await milestone(row.id); res.milestone = ms;
     if (!ALLOWED.includes(ms)) { res.result = 'skipped'; res.reason = 'protected milestone (' + (ms || 'unknown') + ')'; return res; }
+    const msgs = await messages(row.id); const mf = scanMessages(msgs); res.msgFlags = mf;
+    if (['dead', 'canceled', 'cancelled'].includes(ms) && mf.doNotCall) { res.result = 'skipped'; res.reason = 'Do Not Call (dead reason: ' + (mf.deadReason || 'internal note') + ') - not touched'; return res; } /* v1.3.7 */
     const { d, companies } = await readInfo(row.id); res.before = d;
     const files = await docs(row.id);
     const pdfs = files.filter((f) => f.ext === 'pdf' && f.href);
@@ -356,7 +363,6 @@ const AIU_CORE = (env) => {
     // v1.1.0: PDFs in the Scope of Loss folder that did not look like a scope are said out loud, not silently ignored
     const notScopes = scopeCands.filter((f) => !unreadable.includes(f.name) && !(scope && f.name === scope.file));
     if (!scope && notScopes.length && !unreadable.length) res.flags.push('read but did not recognize as a carrier scope: ' + notScopes.map((f) => f.name).join(', '));
-    const msgs = await messages(row.id); const mf = scanMessages(msgs); res.msgFlags = mf;
     res.flags.push(...mf.notes);
     res.scope = scope;
 
@@ -383,7 +389,13 @@ const AIU_CORE = (env) => {
       if (mf.carrierInMsg) { const c = carrierToList(mf.carrierInMsg, companies); if (c && c.id && !c.isOther) { want.carrier = c; src.carrier = 'a message naming the insurance company'; } }
       if (mf.claimInMsg && blank(d.ClaimNumber)) res.flags.push('a message mentions claim number ' + mf.claimInMsg + ' but there is no readable scope; check it');
       if (contingency && blank(d.ClaimNumber)) res.flags.push('contingency on file (often handwritten); check it for carrier and claim number');
-      if (mf.claimFiledMsg && !d.ClaimField) res.flags.push('messages say a claim was filed; ' + (unreadable.length || picScopes.length ? 'the scope needs a person to read it' : 'no scope on file'));
+      /* v1.3.7 (Andrew, 11/19): a scope is on file but can't be read -> Damage Location True + Has Paperwork only (no other info); no scope at all but messages say a claim was filed -> Claim Filed only */
+      const unreadScope = unreadable.length || picScopes.length || notScopes.length;
+      if (unreadScope) {
+        const what = 'a scope on file that the script can\'t read';
+        if (mf.denied) res.flags.push('Damage Location left blank because messages mention a denial'); else { want.DamageLocation = 'True'; src.DamageLocation = what; }
+        want.HavePaperwork = true; src.HavePaperwork = what;
+      } else if (mf.claimFiledMsg && !d.ClaimField) { want.ClaimField = true; src.ClaimField = 'messages say a claim was filed; no scope on file'; }
     }
 
     // fill blanks only
@@ -409,6 +421,18 @@ const AIU_CORE = (env) => {
       else if (k === 'AdjusterName' && norm(adj[k]) !== norm(wantAdj[k])) res.flags.push('conflict: Adjuster Name on file is ' + adj[k] + ', scope says ' + wantAdj[k]);
       else if (/Phone|Fax/.test(k) && adj[k].replace(/\D/g, '').slice(-10) !== wantAdj[k].replace(/\D/g, '').slice(-10)) res.flags.push('note: ' + label[k] + ' on file differs from the scope; left as is');
     }
+    /* v1.3.7 (Andrew, 11/19): Met Adjuster = Yes when messages say the adjuster was met; Claim Approved = Yes for a full or partial approval (never when messages also mention a denial). Blank fields only; leads in the Approved milestone are never in the working list. */
+    if (mf.metAdjuster && !adj.MetWithAdjuster) { adj.MetWithAdjuster = true; adjChanged = true; res.set.push('Met Adjuster (messages mention meeting the adjuster)'); }
+    if ((mf.fullApproval || mf.partial) && !adj.ClaimApproved) {
+      if (mf.denied) res.flags.push('messages mention both an approval and a denial; Claim Approved left blank');
+      else { adj.ClaimApproved = true; adjChanged = true; res.set.push('Claim Approved (' + (mf.fullApproval ? 'full' : 'partial') + ' approval mentioned in messages)'); }
+    }
+    // things Andrew said need no person: drop those notes once the field is set (or when there is nothing to set)
+    const drop = [/messages mention a denied claim/];
+    if (adj.MetWithAdjuster) drop.push(/messages mention meeting the adjuster/);
+    if (adj.ClaimApproved) drop.push(/messages mention a (?:full|partial) approval/);
+    if (!scope && (unreadable.length || picScopes.length || notScopes.length)) drop.push(/^scope is a (?:scan or picture|photo)/, /^read but did not recognize/);
+    res.flags = res.flags.filter((x) => !drop.some((re) => re.test(x)));
     if (insChanged) res.ins = ins; if (adjChanged) res.adj = adj;
     res.result = (insChanged || adjChanged) ? 'updated' : 'nochange';
     if (!scope && res.result === 'nochange') res.reason = files.length ? 'no carrier scope on file' : 'no documents on file';
@@ -427,7 +451,7 @@ const AIU_CORE = (env) => {
     if (res.ins && res.ins.DateOfLoss && dayOf(d.DateOfLoss) !== dayOf(res.ins.DateOfLoss)) bad.push('DateOfLoss');
     if (res.adj) for (const k of ['AdjusterName', 'AdjusterPhone', 'AdjusterExt', 'AdjusterFax', 'AdjusterEmail']) { const a = String(d[k] ?? ''), b = String(res.adj[k] ?? ''); /* v1.3.6: AccuLynx reformats phone numbers on save, so compare phones and fax by digits only */ if (/Phone$|Fax$/.test(k) ? a.replace(/\D/g, '') !== b.replace(/\D/g, '') : a !== b) bad.push(k); }
     // nothing we did not mean to touch may change
-    for (const k of ['MetWithAdjuster', 'ClaimApproved']) if (!!d[k] !== !!res.before[k]) bad.push(k + ' changed unexpectedly');
+    for (const k of ['MetWithAdjuster', 'ClaimApproved']) { const want = res.adj ? !!res.adj[k] : !!res.before[k]; if (!!d[k] !== want) bad.push(k + ' did not match after saving'); } /* v1.3.7: these two may now be set on purpose */
     if (bad.length) { res.flags.push('read-back did not match for: ' + bad.join(', ')); res.review = true; res.verify = 'mismatch'; } else res.verify = 'ok';
     return res;
   }
@@ -438,7 +462,7 @@ const AIU_CORE = (env) => {
 (function () {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.3.6';
+  const VERSION = '1.3.7'; const RULES_V = '1.3.7';
   // v1.1.0: maxLeadsThisRun stops a run after that many leads (0 = no limit)
   const DEFAULTS = { secondsBetweenLeads: 12, maxLeadsPerHour: 120, restMinutesAfterFullPass: 30, webhookUrl: '', maxLeadsThisRun: 25 };
   const S = {
@@ -470,7 +494,7 @@ const AIU_CORE = (env) => {
   /* ---- logs ---- */
   const cap = (arr, n) => (arr.length > n ? arr.slice(arr.length - n) : arr);
   function record(res) {
-    const done = S.get('aiu_done', {}); done[res.id] = { t: res.touched || '', r: res.result, rv: !!res.review, at: Date.now(), dry: false }; S.set('aiu_done', done);
+    const done = S.get('aiu_done', {}); done[res.id] = { t: res.touched || '', r: res.result, rv: !!res.review, at: Date.now(), dry: false, v: RULES_V }; S.set('aiu_done', done);
     const log = S.get('aiu_log', []);
     log.push([new Date().toLocaleString(), res.name, res.link, res.milestone || '', res.result, res.set.join('; '), res.reason || '', res.flags.join('; '), res.verify || '']);
     S.set('aiu_log', cap(log, 20000));
@@ -511,7 +535,8 @@ const AIU_CORE = (env) => {
   const wait = async (ms) => { const end = Date.now() + ms; while (Date.now() < end) { if (stopAsked) throw new core.StopError(); holdLock(); await core.sleep(Math.min(5000, end - Date.now())); } };
   function hourOk() { const h = S.get('aiu_hour', { start: Date.now(), n: 0 }); if (Date.now() - h.start > 3600000) { S.set('aiu_hour', { start: Date.now(), n: 0 }); return 0; } return h.n >= settings().maxLeadsPerHour ? h.start + 3600000 - Date.now() : 0; }
   function countHour() { const h = S.get('aiu_hour', { start: Date.now(), n: 0 }); h.n++; S.set('aiu_hour', h); }
-  function needsWork(row) { const d = S.get('aiu_done', {})[row.id]; if (!d) return true; if (d.dry) return true; if (d.r === 'error') return Date.now() - d.at > 6 * 3600000; return d.t !== (row.touched || '') && d.r !== 'skipped' ? true : false; }
+  /* v1.3.7: leads that were put on the needs-review list under older rules get looked at once more under the new rules */
+  function needsWork(row) { const d = S.get('aiu_done', {})[row.id]; if (!d) return true; if (d.dry) return true; if (d.r === 'error') return Date.now() - d.at > 6 * 3600000; if (d.rv && d.v !== RULES_V && d.r !== 'skipped') return true; return d.t !== (row.touched || '') && d.r !== 'skipped' ? true : false; }
 
   async function run() {
     if (running) return; if (!lockFree()) { alert('The insurance updater is already running in another AccuLynx tab. Use that tab, or close it and wait a minute.'); return; }
