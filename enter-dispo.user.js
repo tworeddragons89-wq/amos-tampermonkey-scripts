@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos - Enter Dispo
 // @namespace    amos-exteriors
-// @version      3.1
+// @version      3.2
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @description  Adds an "Enter Dispo" button to a rep's GroupMe messages. Click it, pick the rep's appointment (today or tomorrow, from the AccuLynx calendar), then choose "Got it" or "current": the message is posted as a comment on that job and your reply is typed in the thread.
@@ -335,6 +335,30 @@
       return text.replace(/[￼​-‍⁠﻿]/g, '');
     }
 
+    // Date of a post: the nearest day heading above it in the thread ("November 12", "Yesterday", "Today").
+    // No heading (or "Just now") means today. Returns YYYY-MM-DD.
+    function postDate(msg) {
+      const now = new Date(), iso = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+      const MON = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+      const heading = /^(today|yesterday|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:,?\s+\d{4})?|\d{1,2}\/\d{1,2}\/\d{2,4})$/i;
+      let found = '';
+      for (const e of document.querySelectorAll('div,span,p,h2,h3,time')) {
+        if (e.children.length || e.textContent.length > 24) continue;
+        if (!(e.compareDocumentPosition(msg) & 4)) continue;           // heading must come before the message
+        const t = e.textContent.trim();
+        if (heading.test(t)) found = t;
+      }
+      if (!found || /^today$/i.test(found)) return iso(now);
+      if (/^yesterday$/i.test(found)) return iso(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+      let m = found.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+      if (m) return `${m[3].length === 2 ? '20' + m[3] : m[3]}-${pad2(+m[1])}-${pad2(+m[2])}`;
+      m = found.match(/^([a-z]+)\.?\s+(\d{1,2})(?:,?\s+(\d{4}))?$/i);
+      const mi = MON.indexOf(m[1].slice(0, 3).toLowerCase());
+      let y = m[3] ? +m[3] : now.getFullYear();
+      if (!m[3] && new Date(y, mi, +m[2]) > new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)) y--;   // a future date means last year
+      return `${y}-${pad2(mi + 1)}-${pad2(+m[2])}`;
+    }
+
     // Time of a post. GroupMe shows the time only on the first of several back-to-back
     // posts by the same person, so walk back up that run until a time is found.
     function postTime(msg) {
@@ -411,7 +435,7 @@
       GM_deleteValue(KEY_DONE);
       GM_setValue(KEY_JOB, Object.assign({}, lead, {
         jobId: jobId || '', reply, dam: !!(flags && flags.dam), claim: !!(flags && flags.claim),
-        rep: ctx.rep, time: ctx.time, text: ctx.text,
+        rep: ctx.rep, time: ctx.time, date: ctx.date, text: ctx.text,
         comment: `Dispo from ${ctx.rep} (${ctx.time}):\n${ctx.text}`,
         threadUrl: location.href, originTab: TAB_ID, created
       }));
@@ -591,7 +615,7 @@
           let rep = senderOf(msg).replace(/\s+\d+$/, '');              // "Duke Antonijevic 2" → "Duke Antonijevic"
           const cm = rep.match(/^([^,]+),\s*(.+)$/);                   // "Karandos,David" → "David Karandos"
           if (cm) rep = cm[2] + ' ' + cm[1];
-          openPicker({ text, time, rep, owner, lead: parseLead(text), btn });
+          openPicker({ text, time, date: postDate(msg), rep, owner, lead: parseLead(text), btn });
         });
         anchor.insertAdjacentElement('afterend', btn);
       });
@@ -816,7 +840,7 @@
         if (wantDam) { if (blank(ins.DamageLocation)) { ins.DamageLocation = 'True'; did.push('Damage Location True'); } else if (String(ins.DamageLocation).toLowerCase() !== 'true') notes.push('Damage Location already says "' + ins.DamageLocation + '", left as is'); }
         if (wantClaim) {
           if (!ins.ClaimField) { ins.ClaimField = true; did.push('Filed Claim'); }
-          if (blank(ins.ClaimFiledDate)) { const n = new Date(); ins.ClaimFiledDate = `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}T00:00:00.000Z`; did.push('claim date ' + (n.getMonth() + 1) + '/' + n.getDate() + '/' + n.getFullYear()); }
+          if (blank(ins.ClaimFiledDate)) { const dd = /^\d{4}-\d{2}-\d{2}$/.test(job.date || '') ? job.date : isoOf(new Date()); const [dy, dm, dday] = dd.split('-').map(Number); ins.ClaimFiledDate = dd + 'T00:00:00.000Z'; did.push('claim date ' + dm + '/' + dday + '/' + dy); }
         }
         if (did.length) {
           await call('/api/jobs/SaveInsuranceInfo', { method: 'POST', body: JSON.stringify({ JobDetail: ins, jobId: id }) });
