@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos Dead Lead Reviver
 // @namespace    amos-exteriors
-// @version      1.5.0
+// @version      1.5.1
 // @description  Revives dead (Canceled) AccuLynx leads whose initial appointment (or created date) is 10+ years old, and moves the initial appointment to the first Wednesday of that same month and year.
 // @match        https://my.acculynx.com/*
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/dead-lead-reviver.user.js
@@ -15,7 +15,7 @@
   'use strict';
 
   /* ===================== SETTINGS (edit here) ===================== */
-  const VERSION = '1.5.0';
+  const VERSION = '1.5.1';
   const BATCH_SIZE = 25;                    // the run pauses itself after this many revived leads so you can review
   const MIN_AGE_YEARS = 10;                 // "10 years old or older"
   const ASSIGN_REP_TO = 'Mars 3';           // every revived lead is reassigned to this company representative
@@ -59,7 +59,7 @@
     for (const k of Object.keys(S.processed || {})) { if (/^skip: dead reason/.test(S.processed[k])) delete S.processed[k]; }
   }
   if (S.uiVer !== 2) { S.uiVer = 2; S.hidden = true; }     // start collapsed to the small DEAD REVIVE button
-  const save = () => { if (S.running && S.owner && S.owner !== TAB) return; try { GM_setValue(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } };
+  const save = () => { if (S.running && S.owner && S.owner !== TAB) return; S.beat = Date.now(); try { GM_setValue(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } };
 
   function log(msg, level) {
     const line = { t: new Date().toISOString(), level: level || 'info', msg: String(msg) };
@@ -566,7 +566,7 @@
     }
     panel.style.background = '#fff'; panel.style.border = '1px solid #1f3b63'; panel.style.boxShadow = '0 4px 18px rgba(0,0,0,.3)';
     panel.style.width = '320px';
-    const head = el('div', 'background:#1f3b63;color:#fff;padding:6px 8px;cursor:move;border-radius:7px 7px 0 0;font-weight:bold;display:flex;justify-content:space-between;', 'Dead Lead Reviver v' + VERSION + '<span>' + (S.running ? (S.owner && S.owner !== TAB ? '&#9679; running in another tab' : '&#9679; RUNNING') : '&#9632; stopped') + '</span>');
+    const head = el('div', 'background:#1f3b63;color:#fff;padding:6px 8px;cursor:move;border-radius:7px 7px 0 0;font-weight:bold;display:flex;justify-content:space-between;', 'Dead Lead Reviver v' + VERSION + '<span>' + (S.running ? (S.owner && S.owner !== TAB ? (Date.now() - (S.beat || 0) > 300000 ? '&#9679; STALLED - press Start here' : '&#9679; running in another tab') : '&#9679; RUNNING') : '&#9632; stopped') + '</span>');
     const hideBtn = el('span', 'cursor:pointer;margin-left:8px;padding:0 6px;border:1px solid #fff;border-radius:3px;font-weight:normal;', 'Hide');
     hideBtn.title = 'Hide this panel (the script keeps running). Click the small DLR pill or press Alt+Shift+D to show it again.';
     hideBtn.onmousedown = e => e.stopPropagation();
