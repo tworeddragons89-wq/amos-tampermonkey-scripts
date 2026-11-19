@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos - Enter Dispo
 // @namespace    amos-exteriors
-// @version      3.0
+// @version      3.1
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @description  Adds an "Enter Dispo" button to a rep's GroupMe messages. Click it, pick the rep's appointment (today or tomorrow, from the AccuLynx calendar), then choose "Got it" or "current": the message is posted as a comment on that job and your reply is typed in the thread.
@@ -232,6 +232,10 @@
   }
   // A one-line message ("running late to my 2") has no "last lines" - use the whole line to spot a repeat.
   const oneLineKey = (text) => { const l = text.split('\n').map((x) => x.trim()).filter(Boolean); return l.length === 1 && l[0].length >= 12 ? l[0] : ''; };
+  // Insurance box triggers: words in the dispo turn on the matching box automatically
+  const hit = (t, re, no) => { const s = String(t || ''); return re.test(s) && !no.test(s); };
+  const wantsDamage = (t) => hit(t, /found\s+damage/i, /(?:\bno|\bnot|n't|\bwithout)\s+found\s+damage|found\s+damage\s*[:\-?]*\s*(?:no|none|n\/a|false)\b/i);
+  const wantsClaim = (t) => hit(t, /filed\s+(?:a\s+)?claim/i, /(?:\bno|\bnot|n't|\bnever|\bhaven't)\s+(?:yet\s+)?filed\s+(?:a\s+)?claim|filed\s+claim\s*[:\-?]*\s*(?:no|none|n\/a|false)\b/i);
   // </parse>
 
   // =====================================================================
@@ -394,7 +398,7 @@
     }
 
     // ---------- Start the entry: open the job (or search) in AccuLynx; the reply word comes from the button chosen ----------
-    function launch(ctx, jobId, reply) {
+    function launch(ctx, jobId, reply, flags) {
       const lead = ctx.lead;
       if (!jobId && !lead.search) {
         const typed = prompt('Could not read a job #, address or name from this message. Type what to search AccuLynx for:', '');
@@ -406,7 +410,7 @@
       const created = Date.now();
       GM_deleteValue(KEY_DONE);
       GM_setValue(KEY_JOB, Object.assign({}, lead, {
-        jobId: jobId || '', reply,
+        jobId: jobId || '', reply, dam: !!(flags && flags.dam), claim: !!(flags && flags.claim),
         rep: ctx.rep, time: ctx.time, text: ctx.text,
         comment: `Dispo from ${ctx.rep} (${ctx.time}):\n${ctx.text}`,
         threadUrl: location.href, originTab: TAB_ID, created
@@ -435,6 +439,10 @@
     function openPicker(ctx) {
       closePicker();
       const el = (tag, style, text) => { const e = document.createElement(tag); if (style) e.style.cssText = style; if (text !== undefined) e.textContent = text; return e; };
+      const autoDam = wantsDamage(ctx.text), autoClaim = wantsClaim(ctx.text);
+      const flags = {};                                  // per appointment index: { dam, claim }
+      const flagsOf = (i) => (flags[i] = flags[i] || { dam: autoDam, claim: autoClaim });
+      const textFlags = { dam: autoDam, claim: autoClaim };
       const ov = el('div', 'position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center');
       ov.id = 'amosPickerOv';
       ov.addEventListener('mousedown', (e) => { if (e.target === ov) closePicker(); });
@@ -462,7 +470,13 @@
       const bGot = mkBtn('Got it', '#2b7'), bCur = mkBtn('current', '#0a6cff');
       const bCancel = el('button', 'margin-left:auto;background:#eee;color:#222;border:0;border-radius:6px;padding:9px 14px;font:14px Arial,sans-serif;cursor:pointer', 'Cancel');
       bCancel.addEventListener('click', closePicker);
-      foot.appendChild(textLbl); foot.appendChild(bGot); foot.appendChild(bCur); foot.appendChild(bCancel);
+      const tf = el('div', 'flex:1 1 100%;display:flex;gap:14px;font-size:12px;color:#555;font-weight:bold');
+      [['dam', 'Dam (Found Damage)'], ['claim', 'Claim (Filed Claim)']].forEach(([k, lab]) => {
+        const l = el('label', 'display:flex;align-items:center;gap:4px;cursor:pointer'); const c = el('input'); c.type = 'checkbox'; c.checked = !!textFlags[k];
+        c.addEventListener('change', () => { textFlags[k] = c.checked; }); l.appendChild(c); l.appendChild(document.createTextNode(lab)); tf.appendChild(l);
+      });
+      textLbl.appendChild(document.createElement('span'));
+      foot.appendChild(textLbl); foot.appendChild(tf); foot.appendChild(bGot); foot.appendChild(bCur); foot.appendChild(bCancel);
       box.appendChild(head); box.appendChild(status); box.appendChild(list); box.appendChild(foot);
       ov.appendChild(box); document.body.appendChild(ov);
 
@@ -487,6 +501,22 @@
           row.appendChild(el('div', 'color:#444;font-size:13px', a.address || '(no address on the appointment)'));
           const rd = new Date(a.date + 'T12:00:00');
           row.appendChild(el('div', 'color:#444;font-size:13px', `${DOW[rd.getDay()]} ${rd.getMonth() + 1}/${rd.getDate()} · ${fmtClock(a.sMin)} – ${fmtClock(a.eMin)}`));
+          row.style.display = 'flex'; row.style.gap = '10px'; row.style.alignItems = 'center';
+          [...row.children].forEach((c) => { c.style.flex = ''; });
+          const left = el('div', 'flex:1;min-width:0');
+          while (row.firstChild) left.appendChild(row.firstChild);
+          row.appendChild(left);
+          const fl = flagsOf(i);
+          const side = el('div', 'display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:bold;flex:none');
+          [['dam', 'Dam', 'Found Damage: puts True in Damage Location'], ['claim', 'Claim', 'Filed Claim: checks Filed Claim and fills the date']].forEach(([k, lab, tip]) => {
+            const l = el('label', 'display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap'); l.title = tip;
+            const c = el('input'); c.type = 'checkbox'; c.checked = !!fl[k];
+            c.addEventListener('click', (e) => e.stopPropagation());
+            c.addEventListener('change', () => { fl[k] = c.checked; });
+            l.addEventListener('click', (e) => e.stopPropagation());
+            l.appendChild(c); l.appendChild(document.createTextNode(lab)); side.appendChild(l);
+          });
+          row.appendChild(side);
           row.addEventListener('click', () => { sel = i; textBox.checked = false; render(); updateButtons(); });
           list.appendChild(row);
         });
@@ -515,7 +545,8 @@
         const appt = (!textBox.checked && sel >= 0) ? appts[sel] : null;
         if (!appt && !textBox.checked) return;
         if (appt && !GUID.test(appt.ref)) { toast('That appointment has no job attached, so I cannot post to it. Use the search option instead.', '#e80'); return; }
-        if (launch(ctx, appt ? appt.ref : '', reply)) closePicker();
+        const fl = appt ? flagsOf(sel) : textFlags;
+        if (launch(ctx, appt ? appt.ref : '', reply, fl)) closePicker();
       };
       bGot.addEventListener('click', () => go('Got it'));
       bCur.addEventListener('click', () => go('current'));
@@ -573,14 +604,17 @@
       if (location.href !== done.threadUrl) {
         sessionStorage.setItem('amosSendCurrent', done.threadUrl);
         sessionStorage.setItem('amosSendReply', done.reply || 'current');
+        if (done.note) sessionStorage.setItem('amosDispoNote', done.note);
         location.href = done.threadUrl;
         return;
       }
+      if (done.note) toast(done.note, '#e80');
       sendCurrent(done.reply || 'current');
     });
 
     async function sendCurrent(word) {
       word = word || 'current';
+      try { const n = sessionStorage.getItem('amosDispoNote'); if (n) { sessionStorage.removeItem('amosDispoNote'); toast(n, '#e80'); } } catch (e) {}
       GM_deleteValue(KEY_DONE);
       const box = await waitFor(() => document.querySelector('[role="textbox"]') || document.querySelector('[contenteditable="true"]') || document.querySelector('textarea'));
       if (!box) return toast('Could not find the GroupMe message box', '#c33');
@@ -760,10 +794,50 @@
       finish(job);
     }
 
-    function finish(job) {
+    // Insurance box: Damage Location "True" and/or Filed Claim + date, saved the same way the Insurance Updater saves
+    async function applyInsurance(job) {
+      const wantDam = job.dam || wantsDamage(job.text), wantClaim = job.claim || wantsClaim(job.text);
+      if (!wantDam && !wantClaim) return '';
+      const m = location.pathname.match(/\/jobs\/([0-9a-f-]{36})/i);
+      const id = (job.jobId || (m && m[1]) || '').toLowerCase();
+      if (!id) return 'Dispo posted, but the insurance box was not updated (no job id).';
+      const call = async (path, opts) => {
+        const r = await fetch(path, Object.assign({ credentials: 'same-origin' }, opts, { headers: Object.assign({ Accept: 'application/json' }, opts && opts.body ? { 'Content-Type': 'application/json' } : {}) }));
+        if (!r.ok) throw new Error('AccuLynx said ' + r.status);
+        const t = await r.text(); return t ? JSON.parse(t) : null;
+      };
+      try {
+        status('updating the insurance box...');
+        const read = async () => (await call(`/api/jobOverview/${id}/GetLocationInformationWithInsurance`)).job.JobDetail;
+        const d = await read();
+        const blank = (v) => v === null || v === undefined || String(v).trim() === '';
+        const ins = { InsuranceCompanyID: d.InsuranceCompanyID || null, DamageLocation: d.DamageLocation || '', DateOfLoss: d.DateOfLoss || null, ClaimField: !!d.ClaimField, ClaimFiledDate: d.ClaimFiledDate || null, ClaimNumber: d.ClaimNumber || '', HavePaperwork: !!d.HavePaperwork, InsuranceCompanyOtherName: d.InsuranceCompanyOtherName || '' };
+        const did = []; const notes = [];
+        if (wantDam) { if (blank(ins.DamageLocation)) { ins.DamageLocation = 'True'; did.push('Damage Location True'); } else if (String(ins.DamageLocation).toLowerCase() !== 'true') notes.push('Damage Location already says "' + ins.DamageLocation + '", left as is'); }
+        if (wantClaim) {
+          if (!ins.ClaimField) { ins.ClaimField = true; did.push('Filed Claim'); }
+          if (blank(ins.ClaimFiledDate)) { const n = new Date(); ins.ClaimFiledDate = `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}T00:00:00.000Z`; did.push('claim date ' + (n.getMonth() + 1) + '/' + n.getDate() + '/' + n.getFullYear()); }
+        }
+        if (did.length) {
+          await call('/api/jobs/SaveInsuranceInfo', { method: 'POST', body: JSON.stringify({ JobDetail: ins, jobId: id }) });
+          const back = await read();
+          const bad = [];
+          if (wantDam && String(back.DamageLocation || '').toLowerCase() !== String(ins.DamageLocation).toLowerCase()) bad.push('Damage Location');
+          if (wantClaim && !back.ClaimField) bad.push('Filed Claim');
+          if (wantClaim && blank(back.ClaimFiledDate)) bad.push('claim date');
+          if (bad.length) return 'Dispo posted, but the insurance box did not save: ' + bad.join(', ') + '. Please check the job.';
+        }
+        return (did.length ? 'Insurance box updated: ' + did.join(', ') + '.' : 'Insurance box already filled in.') + (notes.length ? ' ' + notes.join(' ') : '');
+      } catch (e) {
+        return 'Dispo posted, but the insurance box was NOT updated (' + (e && e.message ? e.message : e) + '). Please do it by hand.';
+      }
+    }
+
+    async function finish(job) {
+      const note = await applyInsurance(job);
       sessionStorage.removeItem('amosDispoSearched');
       GM_deleteValue(KEY_JOB);
-      GM_setValue(KEY_DONE, { threadUrl: job.threadUrl, originTab: job.originTab, reply: job.reply || 'current', at: Date.now() });
+      GM_setValue(KEY_DONE, { threadUrl: job.threadUrl, originTab: job.originTab, reply: job.reply || 'current', note, at: Date.now() });
       setTimeout(() => window.close(), 1200);                                  // back to GroupMe
     }
   }
