@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos - Enter Dispo
 // @namespace    amos-exteriors
-// @version      3.2
+// @version      3.3
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @description  Adds an "Enter Dispo" button to a rep's GroupMe messages. Click it, pick the rep's appointment (today or tomorrow, from the AccuLynx calendar), then choose "Got it" or "current": the message is posted as a comment on that job and your reply is typed in the thread.
@@ -814,7 +814,7 @@
         return !b || !b.value;
       }, 8000);
       if (!cleared) return fail('Clicked Post but the box did not clear — please check the job.');
-      status('posted. Closing this tab...', '#2b7');
+      status('posted. This tab stays open for you.', '#2b7');
       finish(job);
     }
 
@@ -862,7 +862,7 @@
       sessionStorage.removeItem('amosDispoSearched');
       GM_deleteValue(KEY_JOB);
       GM_setValue(KEY_DONE, { threadUrl: job.threadUrl, originTab: job.originTab, reply: job.reply || 'current', note, at: Date.now() });
-      setTimeout(() => window.close(), 1200);                                  // back to GroupMe
+      // v3.3: the AccuLynx tab stays open (you may need to call the customer from the job)
     }
   }
 })();
