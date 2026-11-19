@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Amos - Enter Dispo
 // @namespace    amos-exteriors
-// @version      2.7
+// @version      3.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
-// @description  Adds an "Enter Dispo" button to a rep's GroupMe dispos. Click it to post the dispo as a comment on the lead's AccuLynx job, then reply "current" in the rep's thread.
+// @description  Adds an "Enter Dispo" button to a rep's GroupMe messages. Click it, pick the rep's appointment (today or tomorrow, from the AccuLynx calendar), then choose "Got it" or "current": the message is posted as a comment on that job and your reply is typed in the thread.
 // @match        https://web.groupme.com/*
 // @match        https://my.acculynx.com/*
 // @grant        GM_setValue
@@ -12,6 +12,9 @@
 // @grant        GM_deleteValue
 // @grant        GM_addValueChangeListener
 // @grant        GM_openInTab
+// @grant        GM_xmlhttpRequest
+// @grant        GM_removeValueChangeListener
+// @connect      my.acculynx.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -20,6 +23,8 @@
 
   const KEY_JOB = 'amosDispoJob';     // dispo waiting to be entered in AccuLynx
   const KEY_DONE = 'amosDispoDone';   // AccuLynx tells GroupMe it finished
+  const KEY_REQ = 'amosDispoReq';     // GroupMe asks an open AccuLynx tab to fetch calendar data (backup route)
+  const KEY_RESP = 'amosDispoResp';   // the AccuLynx tab's answer
   const ACCULYNX_URL = 'https://my.acculynx.com/dashboard';
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -141,8 +146,92 @@
     const cands = lines.slice(-3).filter((l) =>
       l.length >= 20 && !/^[A-Za-z][A-Za-z \/]*:/.test(l) && !/^\d/.test(l) &&
       !/\d{3}[\s.)-]+\d{3}/.test(l) && !/,\s*[A-Z]{2}\b/.test(l) && !/@/.test(l));
-    return cands.sort((a, b) => b.length - a.length)[0] || '';
+    return cands.sort((a, b) => b.length - a.length)[0] || oneLineKey(text);
   }
+
+  // ---------- Appointment picker helpers (pure, unit-tested) ----------
+  const clean = (s) => String(s || '').replace(/ /g, ' ').replace(/\s+/g, ' ').trim();
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const isoOf = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  const fmtClock = (min) => { const m = min % 1440; const h = (Math.floor(m / 60) % 12) || 12; return `${h}:${pad2(m % 60)} ${m >= 720 ? 'PM' : 'AM'}`; };
+  const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  function parseLocal(v) {
+    if (!v) return null;
+    if (typeof v === 'object') v = v.Local || v.local || v.DateTime || v.Value || '';
+    v = String(v);
+    let m = v.match(/(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/);
+    if (m) return { date: `${m[1]}-${m[2]}-${m[3]}`, min: +m[4] * 60 + +m[5] };
+    m = v.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::\d{2})?\s*([AP]M)?/i);
+    if (m) {
+      let h = +m[4]; const ap = (m[6] || '').toUpperCase();
+      if (ap === 'PM' && h < 12) h += 12; if (ap === 'AM' && h === 12) h = 0;
+      return { date: `${m[3]}-${pad2(+m[1])}-${pad2(+m[2])}`, min: h * 60 + +m[5] };
+    }
+    return null;
+  }
+  // Which AccuLynx calendar belongs to the rep this GroupMe thread is named after?
+  // Matches on the last name (GroupMe says "Rob", AccuLynx says "Robert"); returns null if unsure so the picker shows a drop-down.
+  function calendarForOwner(owner, calendars) {
+    const o = clean(owner).replace(/\s+\d+$/, '');
+    let first = '', last = '';
+    const cm = o.match(/^([^,]+),\s*(.+)$/);
+    if (cm) { last = norm(cm[1]).split(' ').pop(); first = norm(cm[2]).split(' ')[0]; }
+    else { const w = norm(o).split(' ').filter(Boolean); first = w[0] || ''; last = w.length > 1 ? w[w.length - 1] : ''; }
+    if (!last) return null;
+    const bySur = (calendars || []).filter((c) => norm(c.name).split(' ').includes(last));
+    if (bySur.length === 1) return bySur[0];
+    if (bySur.length > 1) return bySur.find((c) => norm(c.name).startsWith(first.slice(0, 2))) || null;
+    return null;
+  }
+  // Turn the AccuLynx appointments search answer into simple rows: name, address, date + time.
+  // Customer appointments (type 2) always; job tasks (type 1 tied to a job) only if includeTasks.
+  function normalizeAppts(raw, includeTasks) {
+    let list = raw;
+    if (!Array.isArray(list)) list = (raw && (raw.Appointments || raw.Items || raw.Results || raw.Data || raw.Events)) || (raw && Object.values(raw).find(Array.isArray)) || [];
+    const out = []; const seen = new Set();
+    for (const e of list) {
+      const type = +(e.EventType || 0);
+      const ref = String(e.ReferenceId || e.JobId || '');
+      if (type !== 2 && !(includeTasks && type === 1 && GUID.test(ref))) continue;
+      const occs = (e.Occurrences && e.Occurrences.length) ? e.Occurrences : [{ Start: e.Start, End: e.End }];
+      for (const o of occs) {
+        const s = parseLocal(o.Start); const en = parseLocal(o.End);
+        if (!s) continue;
+        const key = [ref, s.date, s.min, e.Title].join('|');
+        if (seen.has(key)) continue; seen.add(key);
+        let a = (o && (o.Address || o.address)) || e.Address || e.address || (e.Meta && (e.Meta.jobAddress || e.Meta.address || e.Meta.Address)) || '';
+        if (a && typeof a === 'object') a = [a.Street || a.Address1 || a.Line1 || a.street, a.City || a.city, a.State || a.state, a.Zip || a.ZipCode || a.PostalCode || a.zip].filter(Boolean).join(', ');
+        const full = clean((e.Meta && (e.Meta.jobName || e.Meta.JobName)) || e.JobName || e.Title || '');
+        const jm = full.match(/^(IN-\d+)\s*:?\s*/i);
+        const title = clean(e.Title || '');
+        out.push({
+          ref, type, title, jobNum: jm ? jm[1].toUpperCase() : '', name: full.replace(/^IN-\d+\s*:?\s*/i, '') || title,
+          address: clean(a), date: s.date, sMin: s.min, eMin: en && en.date === s.date ? en.min : s.min + 60,
+          cxl: /\b(cxl|cxld|cancel|cancelled|canceled)\b/i.test(title)
+        });
+      }
+    }
+    return out.sort((x, y) => x.date.localeCompare(y.date) || x.sMin - y.sMin);
+  }
+  // How well does an appointment match the pasted dispo? (used only to pre-highlight a row)
+  function scoreAppt(a, lead) {
+    let s = 0;
+    const nm = norm(a.name + ' ' + a.title);
+    if (lead.jobNum && a.jobNum && a.jobNum === lead.jobNum) s = 100;
+    if (lead.addr && norm(a.address).includes(lead.addr)) s = Math.max(s, 80);
+    const toks = lead.tokens || [];
+    if (toks.length >= 2 && toks.every((k) => nm.includes(k))) s = Math.max(s, 70);
+    return s;
+  }
+  function bestAppt(appts, lead) {
+    const scored = appts.map((a, i) => ({ i, s: scoreAppt(a, lead) })).filter((x) => x.s >= 70).sort((x, y) => y.s - x.s);
+    if (!scored.length) return -1;
+    if (scored.length > 1 && scored[1].s === scored[0].s) return -1;
+    return scored[0].i;
+  }
+  // A one-line message ("running late to my 2") has no "last lines" - use the whole line to spot a repeat.
+  const oneLineKey = (text) => { const l = text.split('\n').map((x) => x.trim()).filter(Boolean); return l.length === 1 && l[0].length >= 12 ? l[0] : ''; };
   // </parse>
 
   // =====================================================================
@@ -254,6 +343,199 @@
       return '';
     }
 
+
+    // ---------- AccuLynx data access (calendar + appointments) ----------
+    function gmReq(method, path, body) {
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method, url: 'https://my.acculynx.com' + path, timeout: 30000,
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          data: body ? JSON.stringify(body) : undefined,
+          onload: resolve, onerror: () => reject(new Error('network error')), ontimeout: () => reject(new Error('timeout'))
+        });
+      });
+    }
+    // Backup route: ask an AccuLynx tab that is already open to make the call for us
+    function relayReq(method, path, body) {
+      return new Promise((resolve, reject) => {
+        const id = Date.now() + '-' + Math.random().toString(36).slice(2);
+        let lid = null;
+        const timer = setTimeout(() => { if (lid !== null) GM_removeValueChangeListener(lid); reject(new Error('no AccuLynx tab answered')); }, 15000);
+        lid = GM_addValueChangeListener(KEY_RESP, (_n, _o, v) => {
+          if (!v || v.id !== id) return;
+          clearTimeout(timer); GM_removeValueChangeListener(lid); resolve(v);
+        });
+        GM_setValue(KEY_REQ, { id, method, path, body, ts: Date.now() });
+      });
+    }
+    async function acculynx(method, path, body) {
+      try {
+        const r = await gmReq(method, path, body);
+        const t = r.responseText || '';
+        if (r.status >= 200 && r.status < 300 && /^\s*[\[{]/.test(t)) return JSON.parse(t);
+      } catch (e) { /* fall through to the backup route */ }
+      const resp = await relayReq(method, path, body);
+      if (!resp.ok) throw new Error('AccuLynx answered ' + (resp.status || resp.error || 'with an error'));
+      return JSON.parse(resp.text);
+    }
+    async function getCalendars() {
+      const arr = await acculynx('GET', '/api/v4/calendars');
+      return (Array.isArray(arr) ? arr : []).map((c) => ({ id: c.CalendarId || c.Id || c.id, name: clean(c.Name || c.name) })).filter((c) => c.id && c.name);
+    }
+    const slashDate = (d) => `${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} 00:00:00`;
+    async function getAppointments(calId, includeTasks) {
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2);     // today + tomorrow
+      const raw = await acculynx('POST', '/api/v4/appointments/search', {
+        CalendarIds: [calId], EventTypes: [1, 2], DateRange: { Start: slashDate(start), End: slashDate(end) }, Filters: []
+      });
+      return normalizeAppts(raw, includeTasks);
+    }
+
+    // ---------- Start the entry: open the job (or search) in AccuLynx; the reply word comes from the button chosen ----------
+    function launch(ctx, jobId, reply) {
+      const lead = ctx.lead;
+      if (!jobId && !lead.search) {
+        const typed = prompt('Could not read a job #, address or name from this message. Type what to search AccuLynx for:', '');
+        if (!typed) return false;
+        const jm = typed.match(/IN[-\s]?(\d{3,6})/i);
+        lead.jobNum = jm ? 'IN-' + jm[1] : '';
+        lead.search = typed.trim(); lead.alts = []; lead.tokens = norm(typed).split(' ').filter(Boolean); lead.addr = '';
+      }
+      const created = Date.now();
+      GM_deleteValue(KEY_DONE);
+      GM_setValue(KEY_JOB, Object.assign({}, lead, {
+        jobId: jobId || '', reply,
+        rep: ctx.rep, time: ctx.time, text: ctx.text,
+        comment: `Dispo from ${ctx.rep} (${ctx.time}):\n${ctx.text}`,
+        threadUrl: location.href, originTab: TAB_ID, created
+      }));
+      const btn = ctx.btn;
+      btn.textContent = 'Entering...'; btn.disabled = true;
+      // If AccuLynx has not reported back in 90 seconds, say so and free the button instead of hanging
+      setTimeout(() => {
+        if (btn.textContent === 'Entering...') {
+          btn.textContent = 'Enter Dispo'; btn.disabled = false;
+          toast('The AccuLynx tab did not finish. Check its tab (the blue/red "Enter Dispo" badge says where it stopped), then click Enter Dispo again.', '#e80');
+        }
+      }, 90 * 1000);
+      try {
+        const url = jobId ? `https://my.acculynx.com/jobs/${jobId}/comments?amosDispo=${created}` : ACCULYNX_URL + '?amosDispo=' + created;
+        GM_openInTab(url, { active: true });
+      } catch (err) {
+        toast('Could not open AccuLynx: ' + (err && err.message ? err.message : err), '#c33');
+        btn.textContent = 'Enter Dispo'; btn.disabled = false;
+      }
+      return true;
+    }
+
+    // ---------- The appointment picker ----------
+    function closePicker() { const o = document.getElementById('amosPickerOv'); if (o) o.remove(); }
+    function openPicker(ctx) {
+      closePicker();
+      const el = (tag, style, text) => { const e = document.createElement(tag); if (style) e.style.cssText = style; if (text !== undefined) e.textContent = text; return e; };
+      const ov = el('div', 'position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center');
+      ov.id = 'amosPickerOv';
+      ov.addEventListener('mousedown', (e) => { if (e.target === ov) closePicker(); });
+      const box = el('div', 'background:#fff;color:#222;width:min(580px,94vw);max-height:88vh;display:flex;flex-direction:column;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);font:14px Arial,sans-serif');
+      const head = el('div', 'padding:12px 14px;border-bottom:1px solid #ddd');
+      head.appendChild(el('div', 'font-weight:bold;font-size:15px', 'Which appointment is this about?'));
+      const preview = ctx.text.length > 160 ? ctx.text.slice(0, 157) + '...' : ctx.text;
+      head.appendChild(el('div', 'margin-top:4px;color:#555;font-size:12px;white-space:pre-wrap', `${ctx.rep}: ${preview}`));
+      const calRow = el('div', 'margin-top:8px;display:flex;gap:8px;align-items:center;font-size:12px');
+      calRow.appendChild(el('span', '', 'Calendar:'));
+      const calSel = el('select', 'padding:3px 6px;font-size:12px;max-width:260px');
+      calRow.appendChild(calSel);
+      const tasksLbl = el('label', 'margin-left:auto;display:flex;align-items:center;gap:4px;cursor:pointer');
+      const tasksBox = el('input'); tasksBox.type = 'checkbox';
+      tasksLbl.appendChild(tasksBox); tasksLbl.appendChild(document.createTextNode('Show job tasks too'));
+      calRow.appendChild(tasksLbl);
+      head.appendChild(calRow);
+      const status = el('div', 'padding:8px 14px;color:#555;font-size:13px', 'Loading the AccuLynx calendar...');
+      const list = el('div', 'overflow:auto;padding:0 10px 6px;flex:1;min-height:80px');
+      const foot = el('div', 'padding:10px 14px;border-top:1px solid #ddd;display:flex;flex-wrap:wrap;gap:8px;align-items:center');
+      const textLbl = el('label', 'flex:1 1 100%;display:flex;align-items:center;gap:6px;font-size:12px;color:#555;cursor:pointer');
+      const textBox = el('input'); textBox.type = 'checkbox';
+      textLbl.appendChild(textBox); textLbl.appendChild(document.createTextNode('Not on the calendar? Find the job by the name / address / job # in the message instead'));
+      const mkBtn = (label, bg) => { const b = el('button', `background:${bg};color:#fff;border:0;border-radius:6px;padding:9px 18px;font:bold 14px Arial,sans-serif;cursor:pointer`, label); b.disabled = true; b.style.opacity = '.45'; return b; };
+      const bGot = mkBtn('Got it', '#2b7'), bCur = mkBtn('current', '#0a6cff');
+      const bCancel = el('button', 'margin-left:auto;background:#eee;color:#222;border:0;border-radius:6px;padding:9px 14px;font:14px Arial,sans-serif;cursor:pointer', 'Cancel');
+      bCancel.addEventListener('click', closePicker);
+      foot.appendChild(textLbl); foot.appendChild(bGot); foot.appendChild(bCur); foot.appendChild(bCancel);
+      box.appendChild(head); box.appendChild(status); box.appendChild(list); box.appendChild(foot);
+      ov.appendChild(box); document.body.appendChild(ov);
+
+      let calendars = [], appts = [], sel = -1;
+      const updateButtons = () => {
+        const ok = textBox.checked || sel >= 0;
+        [bGot, bCur].forEach((b) => { b.disabled = !ok; b.style.opacity = ok ? '1' : '.45'; });
+      };
+      const dayLabel = (iso) => {
+        const now = new Date(); const t = isoOf(now); const tm = isoOf(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
+        const d = new Date(iso + 'T12:00:00');
+        return `${iso === t ? 'Today' : iso === tm ? 'Tomorrow' : ''} ${DOW[d.getDay()]} ${d.getMonth() + 1}/${d.getDate()}`.trim();
+      };
+      const render = () => {
+        list.textContent = '';
+        let lastDay = '';
+        appts.forEach((a, i) => {
+          if (a.date !== lastDay) { lastDay = a.date; list.appendChild(el('div', 'margin:10px 4px 4px;font-weight:bold;font-size:12px;color:#0a6cff;text-transform:uppercase', dayLabel(a.date))); }
+          const on = i === sel && !textBox.checked;
+          const row = el('div', `border:2px solid ${on ? '#0a6cff' : '#e3e3e3'};background:${on ? '#eaf2ff' : '#fff'};border-radius:8px;padding:8px 10px;margin:4px 0;cursor:pointer`);
+          row.appendChild(el('div', 'font-weight:bold', a.name + (a.cxl ? '  (CXL)' : '') + (a.type === 1 ? '  [task: ' + a.title + ']' : '')));
+          row.appendChild(el('div', 'color:#444;font-size:13px', a.address || '(no address on the appointment)'));
+          const rd = new Date(a.date + 'T12:00:00');
+          row.appendChild(el('div', 'color:#444;font-size:13px', `${DOW[rd.getDay()]} ${rd.getMonth() + 1}/${rd.getDate()} · ${fmtClock(a.sMin)} – ${fmtClock(a.eMin)}`));
+          row.addEventListener('click', () => { sel = i; textBox.checked = false; render(); updateButtons(); });
+          list.appendChild(row);
+        });
+        updateButtons();
+      };
+      const loadAppts = async () => {
+        const cal = calendars.find((c) => c.id === calSel.value);
+        sel = -1; appts = []; list.textContent = '';
+        if (!cal) { status.textContent = 'Pick the rep\'s calendar above.'; return; }
+        status.textContent = `Loading ${cal.name}'s appointments...`;
+        try {
+          appts = await getAppointments(cal.id, tasksBox.checked);
+          sel = bestAppt(appts, ctx.lead);
+          status.textContent = appts.length
+            ? `${appts.length} appointment${appts.length === 1 ? '' : 's'} on ${cal.name}'s calendar (today and tomorrow). Tap the right one, then choose your reply.`
+            : `Nothing on ${cal.name}'s calendar for today or tomorrow. Try another calendar, "Show job tasks too", or the search option below.`;
+          render();
+        } catch (e) {
+          status.textContent = 'Could not read AccuLynx (' + (e && e.message ? e.message : e) + '). Open https://my.acculynx.com/calendar in another tab and try again, or use the search option below.';
+        }
+      };
+      calSel.addEventListener('change', loadAppts);
+      tasksBox.addEventListener('change', loadAppts);
+      textBox.addEventListener('change', render);
+      const go = (reply) => {
+        const appt = (!textBox.checked && sel >= 0) ? appts[sel] : null;
+        if (!appt && !textBox.checked) return;
+        if (appt && !GUID.test(appt.ref)) { toast('That appointment has no job attached, so I cannot post to it. Use the search option instead.', '#e80'); return; }
+        if (launch(ctx, appt ? appt.ref : '', reply)) closePicker();
+      };
+      bGot.addEventListener('click', () => go('Got it'));
+      bCur.addEventListener('click', () => go('current'));
+
+      (async () => {
+        try {
+          calendars = await getCalendars();
+          if (!calendars.length) throw new Error('no calendars came back');
+          calendars.sort((a, b) => a.name.localeCompare(b.name));
+          const guess = calendarForOwner(ctx.owner, calendars) || calendarForOwner(ctx.rep, calendars);
+          if (!guess) { const o = el('option', '', '- choose the rep -'); o.value = ''; calSel.appendChild(o); }
+          calendars.forEach((c) => { const o = el('option', '', c.name); o.value = c.id; calSel.appendChild(o); });
+          calSel.value = guess ? guess.id : '';
+          await loadAppts();
+        } catch (e) {
+          status.textContent = 'Could not read AccuLynx (' + (e && e.message ? e.message : e) + '). Open https://my.acculynx.com/calendar in another tab and try again, or use the search option below.';
+        }
+      })();
+    }
+
     function addButtons() {
       if (!isOn()) return;
       const owner = document.title.replace(/^GroupMe \|\s*/i, '').trim();
@@ -278,48 +560,7 @@
           let rep = senderOf(msg).replace(/\s+\d+$/, '');              // "Duke Antonijevic 2" → "Duke Antonijevic"
           const cm = rep.match(/^([^,]+),\s*(.+)$/);                   // "Karandos,David" → "David Karandos"
           if (cm) rep = cm[2] + ' ' + cm[1];
-          const lead = parseLead(text);
-          // No confirmation box: the search term comes straight from the dispo.
-          // Only ask if nothing at all could be read from it.
-          let typed = lead.search;
-          if (!typed) {
-            typed = prompt('Could not read a job #, address or name from this dispo. Type what to search AccuLynx for:', '');
-            if (!typed) return;
-          }
-          if (typed.trim() !== lead.search) {                      // user typed one in
-            const jm = typed.match(/IN[-\s]?(\d{3,6})/i);
-            lead.jobNum = jm ? 'IN-' + jm[1] : '';
-            lead.search = typed.trim();
-            lead.alts = [];
-            lead.tokens = norm(typed).split(' ').filter(Boolean);
-            lead.addr = '';
-          }
-          const created = Date.now();
-          GM_deleteValue(KEY_DONE);
-          GM_setValue(KEY_JOB, Object.assign({}, lead, {
-            rep, time, text,
-            comment: `Dispo from ${rep} (${time}):\n${text}`,
-            threadUrl: location.href,
-            originTab: TAB_ID,
-            created
-          }));
-          btn.textContent = 'Entering...';
-          btn.disabled = true;
-          // If AccuLynx has not reported back in 90 seconds, say so and free the button instead of hanging
-          setTimeout(() => {
-            if (btn.textContent === 'Entering...') {
-              btn.textContent = 'Enter Dispo';
-              btn.disabled = false;
-              toast('The AccuLynx tab did not finish. Check its tab (the blue/red "Enter Dispo" badge says where it stopped), then click Enter Dispo again.', '#e80');
-            }
-          }, 90 * 1000);
-          try {
-            GM_openInTab(ACCULYNX_URL + '?amosDispo=' + created, { active: true });
-          } catch (err) {
-            toast('Could not open AccuLynx: ' + (err && err.message ? err.message : err), '#c33');
-            btn.textContent = 'Enter Dispo';
-            btn.disabled = false;
-          }
+          openPicker({ text, time, rep, owner, lead: parseLead(text), btn });
         });
         anchor.insertAdjacentElement('afterend', btn);
       });
@@ -331,28 +572,32 @@
       if (!done || done.originTab !== TAB_ID) return;            // only the tab that clicked
       if (location.href !== done.threadUrl) {
         sessionStorage.setItem('amosSendCurrent', done.threadUrl);
+        sessionStorage.setItem('amosSendReply', done.reply || 'current');
         location.href = done.threadUrl;
         return;
       }
-      sendCurrent();
+      sendCurrent(done.reply || 'current');
     });
 
-    async function sendCurrent() {
+    async function sendCurrent(word) {
+      word = word || 'current';
       GM_deleteValue(KEY_DONE);
       const box = await waitFor(() => document.querySelector('[role="textbox"]') || document.querySelector('[contenteditable="true"]') || document.querySelector('textarea'));
       if (!box) return toast('Could not find the GroupMe message box', '#c33');
-      typeInto(box, 'current');
+      typeInto(box, word);
       await sleep(500);
       const send = [...document.querySelectorAll('button')].find((b) => visible(b) && !b.disabled && /^send message$/i.test(b.getAttribute('aria-label') || b.title || ''));
       if (send) send.click(); else pressEnter(box);
       await sleep(1200);
-      if ((box.innerText || box.value || '').trim()) return toast('Typed "current" but it did not send — press Enter.', '#e80');
-      toast('Dispo entered and "current" posted.');
+      if ((box.innerText || box.value || '').trim()) return toast('Typed "' + word + '" but it did not send — press Enter.', '#e80');
+      toast('Dispo entered and "' + word + '" posted.');
       document.querySelectorAll('.amosDispoBtn').forEach((b) => { if (b.textContent === 'Entering...') { b.textContent = 'Done ✓'; } });
     }
     if (sessionStorage.getItem('amosSendCurrent') === location.href) {
       sessionStorage.removeItem('amosSendCurrent');
-      setTimeout(sendCurrent, 2500);
+      const w = sessionStorage.getItem('amosSendReply') || 'current';
+      sessionStorage.removeItem('amosSendReply');
+      setTimeout(() => sendCurrent(w), 2500);
     }
   }
 
@@ -364,6 +609,20 @@
     const JOB_RE = /\/jobs\/[0-9a-f-]{36}/i;
     let posting = false;                                     // blocks a second postComment while one is running
 
+    // Backup route for the GroupMe picker: answer calendar requests from an AccuLynx tab that is already open
+    GM_addValueChangeListener(KEY_REQ, async (_n, _o, req) => {
+      if (!req || !req.id || Date.now() - (req.ts || 0) > 60000) return;
+      try {
+        const r = await fetch(req.path, {
+          method: req.method || 'GET', credentials: 'same-origin',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: req.body ? JSON.stringify(req.body) : undefined
+        });
+        const text = await r.text();
+        GM_setValue(KEY_RESP, { id: req.id, ok: r.ok, status: r.status, text: text.slice(0, 5000000) });
+      } catch (e) { GM_setValue(KEY_RESP, { id: req.id, ok: false, error: String(e) }); }
+    });
+
     (async function run() {
       const job = GM_getValue(KEY_JOB);
       if (!job || Date.now() - job.created > 15 * 60 * 1000) return;     // nothing pending
@@ -372,6 +631,7 @@
       if (sessionStorage.getItem(SKEY) !== String(job.created)) return;
 
       try {
+        if (job.jobId) sessionStorage.setItem('amosDispoSearched', '1');     // picked from the calendar: no search needed
         if (!sessionStorage.getItem('amosDispoSearched')) return await doSearch(job);
         if (JOB_RE.test(location.pathname)) return await postComment(job);
         watchForJobPage(job);
@@ -449,6 +709,7 @@
       if (sessionStorage.getItem('amosDispoPosted') === String(job.created)) return;   // never post twice
       const id = location.pathname.match(JOB_RE)[0];
       if (!/\/comments/i.test(location.pathname)) { location.href = id + '/comments'; return; }  // Messages tab
+      if (job.jobId && !location.pathname.toLowerCase().includes(job.jobId.toLowerCase())) return;   // on a different job: never post
       posting = true;
       try {
         await postCommentInner(job);
@@ -502,7 +763,7 @@
     function finish(job) {
       sessionStorage.removeItem('amosDispoSearched');
       GM_deleteValue(KEY_JOB);
-      GM_setValue(KEY_DONE, { threadUrl: job.threadUrl, originTab: job.originTab, at: Date.now() });
+      GM_setValue(KEY_DONE, { threadUrl: job.threadUrl, originTab: job.originTab, reply: job.reply || 'current', at: Date.now() });
       setTimeout(() => window.close(), 1200);                                  // back to GroupMe
     }
   }
