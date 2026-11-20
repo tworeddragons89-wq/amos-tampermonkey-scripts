@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos - Enter Dispo
 // @namespace    amos-exteriors
-// @version      3.3
+// @version      3.4
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @description  Adds an "Enter Dispo" button to a rep's GroupMe messages. Click it, pick the rep's appointment (today or tomorrow, from the AccuLynx calendar), then choose "Got it" or "current": the message is posted as a comment on that job and your reply is typed in the thread.
@@ -776,6 +776,46 @@
       }
     }
 
+    // ---- dispo threads (v3.4) ----
+    const THREAD_HOURS = 72;
+    const parseStamp = (t) => { const m = String(t).match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i); if (!m) return 0; let y = +m[3]; if (y < 100) y += 2000; let h = (+m[4]) % 12; if (/pm/i.test(m[6])) h += 12; return new Date(y, +m[1] - 1, +m[2], h, +m[5]).getTime(); };
+    // Time of the newest "Dispo from ..." message inside one comment thread (the comment itself or any reply)
+    function lastDispoTime(sec) {
+      let best = 0;
+      for (const st of sec.querySelectorAll('.date-time-stamp')) {
+        let n = st;
+        while (n && n !== sec && !(/Dispo from /.test(n.innerText || '') && n.querySelectorAll('.date-time-stamp').length === 1)) n = n.parentElement;
+        if (n && n !== sec) best = Math.max(best, parseStamp(st.textContent));
+      }
+      return best;
+    }
+    function findDispoThread() {
+      let pick = null, at = 0;
+      for (const sec of document.querySelectorAll('section.comment-wrapper')) {
+        const t = lastDispoTime(sec);
+        if (t > at) { at = t; pick = sec; }
+      }
+      return pick && Date.now() - at < THREAD_HOURS * 3600 * 1000 ? pick : null;
+    }
+    async function postReply(sec, job) {
+      const rb = sec.querySelector('button.button-create-reply');
+      if (!rb) return 'nobox';
+      rb.click();
+      const ta = await waitFor(() => [...sec.querySelectorAll('textarea')].find((t) => /reply to this/i.test(t.placeholder || '') && visible(t)), 6000);
+      if (!ta) return 'nobox';
+      typeInto(ta, job.comment);
+      const send = await waitFor(() => {
+        const b = [...sec.querySelectorAll('button')].find((x) => visible(x) && x.innerText.trim() === 'Reply' && !/create-reply/.test(x.className));
+        return b && !b.disabled ? b : null;
+      }, 6000);
+      if (!send) { fail('Reply typed but the Reply button stayed disabled — click Reply yourself.'); return 'failed'; }
+      sessionStorage.setItem('amosDispoPosted', String(job.created));
+      send.click();
+      const sent = await waitFor(() => !document.body.contains(ta) || !visible(ta) || !ta.value, 8000);
+      if (!sent) { fail('Clicked Reply but the box did not clear — please check the job.'); return 'failed'; }
+      return 'done';
+    }
+
     async function postCommentInner(job) {
       // Make sure this is the right job before posting anything
       // (A lead has no IN number in its title; then its own emails/comments must mention the number.)
@@ -799,6 +839,16 @@
       if (key && norm(document.body.innerText).includes(norm(key))) {
         toast('This dispo is already on the job — not posting it again.', '#e80');
         return finish(job);
+      }
+
+      // v3.4: a dispo on a job that already has a recent dispo thread (last dispo under 72 hours old) goes in as a REPLY in that thread
+      const thread = findDispoThread();
+      if (thread) {
+        status('adding to the existing dispo thread...');
+        const r = await postReply(thread, job);
+        if (r === 'done') { status('posted as a reply. This tab stays open for you.', '#2b7'); return finish(job); }
+        if (r === 'failed') return;                                      // already reported; never also post a second copy
+        toast('Could not open the reply box, so the dispo will be posted as a new comment.', '#e80');
       }
 
       typeInto(box, job.comment);
