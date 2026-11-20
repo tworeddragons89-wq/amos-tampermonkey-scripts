@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.4.0
+// @version      1.5.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -26,6 +26,8 @@
 // @connect      maps.googleapis.com
 // @connect      streetviewpixels-pa.googleapis.com
 // @connect      googleusercontent.com
+// @connect      i.groupme.com
+// @connect      groupme.com
 // @connect      server.arcgisonline.com
 // @run-at       document-idle
 // @noframes
@@ -259,6 +261,19 @@
   const SOLD = /^(Approved|Completed|Invoiced|Closed)$/i;
   const OPEN = /^(Lead|Prospect)$/i;
   const DEAD = /^(Dead|Canceled|Cancelled)$/i;
+  // jobs "Submitted for approval" count as SOLD until they are closed (Andrew's rule): returns Map(jobId lower -> {rep, date})
+  async function axSubmitted() {
+    const m = new Map();
+    try {
+      const r = await gm({ method: 'GET', url: 'https://my.acculynx.com/api/v3/job-workflows/track/milestones/3', headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' } });
+      if (r.status !== 200) return m;
+      const j = JSON.parse(r.responseText || 'null');
+      const arr = Array.isArray(j) ? j : (j && (j.items || j.data || j.results || j.jobs)) || [];
+      for (const x of arr) { const id = String(x.JobId || x.jobId || x.Id || '').toLowerCase(); if (id) m.set(id, { rep: x.CompanyRepresentative || x.companyRepresentative || '', date: x.SubmittedDate || '' }); }
+    } catch (e) { /* no AccuLynx sign-in here, or the list is unavailable - the normal sold check still works */ }
+    return m;
+  }
+  const isSold = x => SOLD.test(x.CurrentMilestone || '') || !!x.Submitted;
   async function findDuplicates(f) {
     const ad = splitAddress(f.address);
     const num = (ad.street.match(/^\d+/) || [''])[0];
@@ -294,9 +309,11 @@
     // a phone or email match alone is not enough (numbers get reused) – it must also share the name or the address
     const strong = x => x.why.includes('address') || (x.why.includes('name') && (x.why.includes('phone') || x.why.includes('email')));
     const jobs = matches.filter(x => x.Type !== 'Contact' && x.Id && strong(x));
-    const sold = jobs.filter(x => SOLD.test(x.CurrentMilestone || '') && /^IN-\d+/.test(x.Name || '')).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
-    const open = jobs.filter(x => OPEN.test(x.CurrentMilestone || '')).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
-    const dead = jobs.filter(x => DEAD.test(x.CurrentMilestone || '')).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
+    const subm = await axSubmitted();
+    jobs.forEach(x => { const sb = subm.get(String(x.Id).toLowerCase()); if (sb && !SOLD.test(x.CurrentMilestone || '')) { x.Submitted = true; x.SalesPerson = x.SalesPerson || sb.rep; x.SubmittedRep = sb.rep; } });
+    const sold = jobs.filter(x => isSold(x)).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
+    const open = jobs.filter(x => OPEN.test(x.CurrentMilestone || '') && !x.Submitted).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
+    const dead = jobs.filter(x => DEAD.test(x.CurrentMilestone || '') && !x.Submitted).sort((a, b) => (b.MilestoneStart || '').localeCompare(a.MilestoneStart || ''))[0];
     let plan;
     // Andrew's rules: an OPEN lead (Lead / Prospect) at the house is used; otherwise a SOLD job means a new lead with the
     // IN number in Cross Reference; only when the house has nothing but dead jobs is the newest dead job revived
@@ -306,16 +323,20 @@
       const overYear = oldest.MilestoneStart && (Date.now() - new Date(oldest.MilestoneStart)) / 864e5 > 365;
       plan = { kind: 'revive', jobId: j.Id, name: j.Name, milestone: j.CurrentMilestone, dead: DEAD.test(j.CurrentMilestone || ''), address: j.FullAddress, overYear };
     } else if (sold) {
-      plan = { kind: 'sold', crossRef: ((sold.Name || '').match(/^IN-\d+/) || [''])[0], name: sold.Name, milestone: sold.CurrentMilestone };
+      plan = planForPick(sold, 'prev');
     } else plan = { kind: 'new' };
     return { matches, plan, errors };
   }
   // what Complete does with the record the rep checked as the duplicate
-  function planForPick(j) {
-    if (!j) return { kind: 'new' };
-    if (SOLD.test(j.CurrentMilestone || '')) return { kind: 'sold', crossRef: ((j.Name || '').match(/^IN-\d+/) || [''])[0], name: j.Name, milestone: j.CurrentMilestone };
+  // what Complete does with the record the rep picked. mode: 'dup' = add to that job, 'dupkeep' = add to it but keep its appointment,
+  // 'prev' = Previous Customer (new lead, IN number in Cross Reference), 'new' = ignore it. No mode = the sensible default for that job.
+  function planForPick(j, mode) {
+    if (!j || mode === 'new') return { kind: 'new' };
+    const sold = isSold(j);
+    if (!mode) mode = sold ? 'prev' : 'dup';
+    if (mode === 'prev') return { kind: 'sold', crossRef: ((j.Name || '').match(/^IN-\d+/) || [''])[0], name: j.Name, milestone: j.Submitted ? 'Submitted for approval' : j.CurrentMilestone, sellingRep: clean(j.SalesPerson || j.SubmittedRep || '') };
     const overYear = !!j.MilestoneStart && (Date.now() - new Date(j.MilestoneStart)) / 864e5 > 365;
-    return { kind: 'revive', jobId: j.Id, name: j.Name, milestone: j.CurrentMilestone, dead: DEAD.test(j.CurrentMilestone || ''), address: j.FullAddress, overYear };
+    return { kind: 'revive', jobId: j.Id, name: j.Name, milestone: j.CurrentMilestone, dead: DEAD.test(j.CurrentMilestone || ''), address: j.FullAddress, overYear, keepAppt: mode === 'dupkeep' };
   }
 
   /* ======================================================================================
@@ -538,20 +559,20 @@
         if (!d.matches.length) dupLine.appendChild(el('b', `color:${GREEN}`, 'AccuLynx: no duplicate found - a NEW lead will be created.'));
         else {
           const sugId = d.plan.kind === 'revive' ? d.plan.jobId : d.plan.kind === 'sold' ? (d.matches.find(x => x.Name === d.plan.name) || {}).Id : null;
-          dupLine.appendChild(el('b', `color:${sugId ? RED : NAVY}`, sugId ? 'AccuLynx: POSSIBLE DUPLICATE - open the record to look, then tick DUPLICATE on the matching one.' : 'AccuLynx: similar records found (none at the same house). Tick DUPLICATE only if one is the same customer.'));
+          dupLine.appendChild(el('b', `color:${sugId ? RED : NAVY}`, sugId ? 'AccuLynx: POSSIBLE DUPLICATE - open the record to look, then choose what to do beside it.' : 'AccuLynx: similar records found (none at the same house). Choose an action only if one is the same customer.'));
           const planLine = el('div', 'margin:4px 0;font-weight:700');
           const showPlan = () => {
-            const pl = planForPick(result.pick);
+            const pl = planForPick(result.pick, result.mode);
             planLine.style.color = pl.kind === 'new' ? GREEN : RED;
             planLine.textContent = 'Complete will: ' + (pl.kind === 'new' ? 'create a NEW lead.'
-              : pl.kind === 'sold' ? `create a NEW lead with ${pl.crossRef || 'the IN number'} in Cross Reference (sold customer).`
-              : `use ${pl.name || 'that job'} (${pl.milestone})${pl.dead ? ', re-open it' : ''}, set the new appointment, put the lead report in its comments and finish the lead entry there.` +
+              : pl.kind === 'sold' ? `create a NEW lead (Previous Customer) with ${pl.crossRef || 'the IN number'} in Cross Reference` + (pl.sellingRep ? `, "${pl.sellingRep}" (sold the last job) in the notes under Lead Source` : '') + '. QuickMeasure / Hover / EagleView go on the new job (listed as a to-do).'
+              : `use ${pl.name || 'that job'} (${pl.milestone})${pl.dead ? ', re-open it' : ''}, ` + (pl.keepAppt ? 'KEEP its appointment as it is (the new request goes in the comment)' : 'set the new appointment') + ', put the lead report in its comments and finish the lead entry there.' +
                 (pl.overYear ? ' It is over 1 year old - its Lead Source must change to the new source (listed as a to-do).' : ''));
           };
           const ul = el('div', `margin:4px 0 0 8px;border-left:3px solid ${LINE};padding-left:6px`);
-          const boxes = [];
+          const sels = [];
           d.matches.slice(0, 10).forEach(x => {
-            const r = el('div', 'margin:3px 0');
+            const r = el('div', 'margin:5px 0');
             const isJob = x.Type !== 'Contact' && x.Id;
             if (isJob) {
               const url = 'https://my.acculynx.com/jobs/' + x.Id;
@@ -559,17 +580,22 @@
               a.onclick = e => { e.preventDefault(); openOnScreen([{ url }], false); a.style.color = '#6b3fa0'; };
               r.appendChild(a);
             } else r.appendChild(el('b', '', (x.Name || '(contact)') + ' [contact]'));
-            r.appendChild(document.createTextNode(` - ${x.CurrentMilestone || ''} ${x.MilestoneStart ? '(' + String(x.MilestoneStart).slice(0, 10) + ')' : ''} · ${x.FullAddress || ''} · same ${x.why.join(', ')}`));
+            r.appendChild(document.createTextNode(` - ${x.Submitted ? 'Submitted for approval' : (x.CurrentMilestone || '')} ${x.MilestoneStart ? '(' + String(x.MilestoneStart).slice(0, 10) + ')' : ''} · ${x.FullAddress || ''} · same ${x.why.join(', ')}`));
             if (isJob) {
-              const l = el('label', `display:inline-flex;align-items:center;gap:3px;margin-left:6px;padding:1px 6px;border:1px solid ${RED};border-radius:10px;color:${RED};font-weight:700;font-size:11px;cursor:pointer;white-space:nowrap`);
-              const c = el('input', 'margin:0', null, { type: 'checkbox' });
-              c.onchange = () => { boxes.forEach(b => { if (b !== c) b.checked = false; }); result.pick = c.checked ? x : null; showPlan(); };
-              boxes.push(c); l.appendChild(c); l.appendChild(document.createTextNode('DUPLICATE' + (x.Id === sugId ? ' (suggested)' : '')));
-              r.appendChild(l);
+              const sold = isSold(x);
+              const sel = el('select', `display:block;margin-top:2px;max-width:100%;padding:2px 4px;border:1px solid ${RED};border-radius:6px;color:${RED};font:700 11px Arial,sans-serif`);
+              const opts = sold ? [['', '- what to do with this job? -'], ['prev', 'Previous Customer: new lead + prior info'], ['new', 'Enter as a new lead anyway']]
+                : [['', '- what to do with this job? -'], ['dup', 'Duplicate: add the new info to THIS job'], ['dupkeep', 'Duplicate: add info, KEEP its appointment'], ['new', 'Enter as a new lead anyway']];
+              opts.forEach(([v, t]) => sel.appendChild(el('option', '', t + (v && x.Id === sugId && ((sold && v === 'prev') || (!sold && v === 'dup')) ? ' (suggested)' : ''), { value: v })));
+              sel.onchange = () => { sels.forEach(o => { if (o !== sel) o.value = ''; }); result.pick = sel.value && sel.value !== 'new' ? x : null; result.mode = sel.value; showPlan(); };
+              sels.push(sel); r.appendChild(sel);
             }
             ul.appendChild(r);
           });
-          dupLine.appendChild(ul); dupLine.appendChild(planLine); showPlan();
+          dupLine.appendChild(ul); dupLine.appendChild(planLine);
+          // pre-choose the suggested action, as before
+          if (sugId) { const sel = sels[d.matches.slice(0, 10).filter(x => x.Type !== 'Contact' && x.Id).findIndex(x => x.Id === sugId)]; if (sel && sel.options.length > 1) { sel.selectedIndex = 1; sel.onchange(); } }
+          else showPlan();
         }
         if (d.errors.length) dupLine.appendChild(el('div', `color:${RED}`, 'Search problems: ' + d.errors.join('; ')));
       }).catch(e => { dupLine.textContent = 'AccuLynx: ' + e.message; dupLine.style.color = RED; });
@@ -586,6 +612,7 @@
       const prod = [L.products.join(', '), L.productOther].filter(Boolean).join(' - ');
       return [
         'Lead Source: ' + L.leadSource,
+        ...(L.plan && L.plan.kind === 'sold' && L.plan.sellingRep ? ['Previous sale (' + (L.crossRef || 'sold job') + ') by: ' + L.plan.sellingRep] : []),
         'Product Interest: ' + prod,
         'Current Product Material: ' + L.material,
         'Current Issues/Concerns: ' + L.concerns,
@@ -599,6 +626,7 @@
         'Mr: ' + L.mr,
       ].concat(L.notes ? ['', 'Notes: ' + L.notes] : []).concat(L.ooa && L.ooa.length ? ['', 'OOA (roof-only area) for: ' + L.ooa.join(', ')] : []).concat(L.crossRef ? ['', 'Existing customer - sold job ' + L.crossRef] : []).map(s => s.trimEnd()).join('\n');
     }
+    let curPrefill = null;
     doneBtn.onclick = async () => {
       let f = readForm();
       const miss = [];
@@ -624,8 +652,8 @@
       if (chk.area && /OUT OF AREA/.test(chk.area.verdict) && !confirm('This address is OUT OF the service area. Enter the lead anyway?')) return;
       const ooa = chk.area && chk.area.roofOnly ? ooaProducts(f.products, f.productOther) : [];
       if (ooa.length && !confirm('This address is in a ROOF ONLY area.\nOOA for: ' + ooa.join(', ') + '\n\nEnter the lead anyway? (the OOA line goes in the notes)')) return;
-      const plan = planForPick(chk.pick);
-      if (!chk.pick && chk.dup.plan.kind !== 'new' && !confirm(`AccuLynx found a likely duplicate (${chk.dup.plan.name || 'same house'}), but no DUPLICATE box is ticked.\n\nOK = enter it as a NEW lead anyway\nCancel = go back and tick the matching record`)) return;
+      const plan = planForPick(chk.pick, chk.mode);
+      if (!chk.pick && chk.mode !== 'new' && chk.dup.plan.kind !== 'new' && !confirm(`AccuLynx found a likely duplicate (${chk.dup.plan.name || 'same house'}), but no DUPLICATE box is ticked.\n\nOK = enter it as a NEW lead anyway\nCancel = go back and tick the matching record`)) return;
       const mins = f.workType === 'Insurance' ? CONFIG.INSURANCE_HOURS * 60 : CONFIG.RETAIL_HOURS * 60;
       const end = new Date(start.getTime() + (f.cts ? 60 : mins) * 60e3);
       const tf = d => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
@@ -640,6 +668,11 @@
       if (!L.trades.length) L.trades = ['Repairs'];
       if (chk.geo) { const ad = splitAddress(f.address); L.city = ad.city || chk.geo.city; L.zip = ad.zip || chk.geo.zip; }
       L.notesText = notesFor(L);
+      if (curPrefill) {      // came from GroupMe's Enter Lead: carry the lead sheet photo + the rep's post, and remember who to tell "entered"
+        L.imageUrl = curPrefill.imageUrl || ''; L.rawPost = curPrefill.raw || '';
+        const pm = GM_getValue('mlf_prefill_map', {}); pm[L.id] = { id: curPrefill.id, chatId: curPrefill.chatId, name: `${L.first} ${L.last}` }; GM_setValue('mlf_prefill_map', pm);
+        curPrefill = null;
+      }
       const q = GM_getValue('mlf_queue', {}); q[L.id] = L; GM_setValue('mlf_queue', q);
       setRecent(L.id, { name: `${L.first} ${L.last}`, msg: 'waiting for AccuLynx…', t: Date.now() });
       // clear the form for the next lead
@@ -697,6 +730,91 @@
       }, 20000);
     }
     setInterval(dispatchTick, 4000);
+
+    /* ---------- Enter Lead (the other GroupMe script) hands a parsed lead to this form ---------- */
+    const de = document.documentElement;
+    de.dataset.amosFormReady = '1';
+    const PROD_RE = [['Roof', /roof/i], ['Gutters', /gutter|guard|gaurd/i], ['Siding', /siding|hardie|hardi\b/i], ['Soffit/Fascia', /soffit|sofit|fascia|\btrim\b/i],
+      ['Windows', /window/i], ['Doors', /\bdoors?\b/i], ['Insulation', /insul/i], ['Masonry', /mason|brick|chimney/i], ['Repairs', /repair|leak/i]];
+    function pickSource(rep) {
+      const n = x => String(x || '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+      const want = n(rep), opts = [...srcSel.options].filter(o => o.value);
+      let o = opts.find(o => n(o.textContent).endsWith(want)) ||
+              opts.find(o => /field marketing/i.test(o.textContent) && want && want.split(' ').every(t => n(o.textContent).includes(t)));
+      return o ? o.value : '';
+    }
+    function setForm(v) {
+      const set = (k, x) => { F[k].value = x == null ? '' : x; };
+      ['first', 'last', 'phone', 'email', 'address', 'productOther', 'material', 'concerns', 'age', 'built', 'purchased', 'style', 'mrs', 'mr'].forEach(k => set(k, v[k]));
+      F.notes.value = v.notes || ''; F.workType.value = v.workType || 'Retail'; F.assign.value = v.assign || '';
+      F.products.forEach(c => { c.checked = (v.products || []).includes(c.value); });
+      F.cts.checked = !!v.cts; F.cts.onchange();
+      F.apptDate.value = v.cts ? '' : (v.apptDate || ''); F.apptTime.value = v.apptMin == null || v.cts ? '' : String(v.apptMin);
+      if (v.leadSourceValue) F.leadSource.value = v.leadSourceValue;
+      checkOut.textContent = ''; lastCheck = null; paintOoa();
+    }
+    document.addEventListener('amos-prefill', async () => {
+      let p = null; try { p = JSON.parse(de.dataset.amosPrefill || 'null'); } catch (e) { /* ignore */ }
+      if (!p || !p.id) return;
+      curPrefill = p;
+      const prods = PROD_RE.filter(([, re]) => re.test(p.productText || '')).map(x => x[0]);
+      setForm({ first: p.first, last: p.last, phone: p.phone, email: p.email, address: p.address, products: prods, productOther: prods.length ? '' : (p.productText || ''),
+        concerns: p.concerns, age: p.age, mrs: p.mrs, mr: p.mr, notes: '', workType: 'Retail', assign: 'Needs Confirmed',
+        apptDate: p.apptDate, apptMin: p.apptMin, cts: !!p.cts });
+      panel.style.display = 'block'; place();
+      de.dataset.amosPrefillAck = p.id; document.dispatchEvent(new Event('amos-prefill-ack'));      // tells Enter Lead the form took the lead
+      status('Lead filled in from GroupMe (' + p.sender + ') - review it, pick what to do with any duplicate, then press COMPLETE.');
+      if (!srcSel.options.length || srcSel.options.length < 2) await waitFor(() => srcSel.options.length > 1, 15000, 400);
+      const sv = pickSource(p.sender);
+      if (sv) F.leadSource.value = sv; else status('Lead Source: no "Field Marketing: ' + p.sender + '" in the list - pick it by hand.', true);
+      runCheck(true);
+    });
+    // tell Enter Lead when the AccuLynx tab has finished a lead that came from GroupMe, so it posts "entered"
+    GM_addValueChangeListener('mlf_recent', (n, o, v) => {
+      const pm = GM_getValue('mlf_prefill_map', {}); let ch = false;
+      for (const [id, info] of Object.entries(pm)) if (v && v[id] && v[id].fin) {
+        de.dataset.amosDone = JSON.stringify({ id: info.id, chatId: info.chatId, name: info.name }); document.dispatchEvent(new Event('amos-lead-done'));
+        delete pm[id]; ch = true;
+      }
+      if (ch) GM_setValue('mlf_prefill_map', pm);
+    });
+
+    /* ---------- extra actions: Reply only / Save for later ---------- */
+    const moreBox = el('div', `margin-top:8px;padding:8px;border:1px dashed ${LINE};border-radius:8px`);
+    moreBox.appendChild(el('div', `font-size:11px;font-weight:700;color:${MUTED};text-transform:uppercase;margin-bottom:4px`, 'Other options (no lead entered)'));
+    const replyRow = el('div', 'display:flex;gap:6px;margin-bottom:6px');
+    const replyTxt = el('input', inputCss + ';flex:1', null, { value: 'Out of area', placeholder: 'reply to the rep' });
+    const replyBtn = el('button', `border:0;border-radius:6px;background:${NAVY};color:#fff;padding:6px 10px;font:700 12px Arial;cursor:pointer`, 'REPLY ONLY');
+    replyBtn.title = 'Posts this text in the rep\'s GroupMe thread and enters nothing in AccuLynx (out of area, not a lead, etc.)';
+    replyRow.appendChild(replyTxt); replyRow.appendChild(replyBtn);
+    const saveBtn = el('button', `width:100%;border:1px solid ${NAVY};border-radius:6px;background:#fff;color:${NAVY};padding:6px;font:700 12px Arial;cursor:pointer`, 'SAVE FOR LATER');
+    moreBox.appendChild(replyRow); moreBox.appendChild(saveBtn);
+    body.insertBefore(moreBox, statusEl);
+    replyBtn.onclick = () => {
+      if (!curPrefill) { status('Reply Only works on a lead that came from Enter Lead in GroupMe.', true); return; }
+      const t = clean(replyTxt.value); if (!t) { status('Type the reply first.', true); return; }
+      if (!confirm('Post "' + t + '" in the rep\'s thread and enter NOTHING in AccuLynx?')) return;
+      de.dataset.amosDone = JSON.stringify({ id: curPrefill.id, chatId: curPrefill.chatId, name: `${F.first.value} ${F.last.value}`.trim(), text: t }); document.dispatchEvent(new Event('amos-lead-done'));
+      status('Reply sent to Enter Lead - it posts "' + t + '" in the thread.'); curPrefill = null; setForm({}); 
+    };
+    const savedEl = el('div', 'font-size:12px;margin-top:4px');
+    moreBox.appendChild(savedEl);
+    function paintSaved() {
+      const list = GM_getValue('mlf_saved', []) || []; savedEl.textContent = '';
+      list.forEach((it, i) => {
+        const d = el('div', `padding:3px 0;border-top:1px solid ${LINE}`);
+        d.appendChild(el('b', '', `${it.f.first} ${it.f.last}`.trim() + ' '));
+        const o = el('a', 'color:#1155cc;cursor:pointer;margin-right:8px', 'open'); o.onclick = () => { curPrefill = it.p; setForm(it.f); if (it.f.leadSourceValue) F.leadSource.value = it.f.leadSourceValue; const l2 = GM_getValue('mlf_saved', []); l2.splice(i, 1); GM_setValue('mlf_saved', l2); status('Saved lead opened - review it, then COMPLETE.'); runCheck(false); };
+        const x = el('a', `color:${RED};cursor:pointer`, 'delete'); x.onclick = () => { const l2 = GM_getValue('mlf_saved', []); l2.splice(i, 1); GM_setValue('mlf_saved', l2); };
+        d.appendChild(o); d.appendChild(x); savedEl.appendChild(d);
+      });
+    }
+    paintSaved(); GM_addValueChangeListener('mlf_saved', paintSaved);
+    saveBtn.onclick = () => {
+      const f = readForm(); if (!f.first && !f.last && !f.address) { status('Nothing to save.', true); return; }
+      const list = GM_getValue('mlf_saved', []) || []; list.unshift({ p: curPrefill, f }); GM_setValue('mlf_saved', list.slice(0, 15));
+      curPrefill = null; setForm({}); status('Saved for later (listed under Other options).');
+    };
 
     btn.onclick = () => { if (panel.style.display === 'none') { panel.style.display = 'block'; place(); } else panel.style.display = 'none'; };
     xBtn.onclick = () => { panel.style.display = 'none'; };
@@ -1373,6 +1491,7 @@
         await sleep(2500);
         let house = null, okAny = false;
         try { house = await getHousePhoto(L); if (house.none) problem(L, 'House picture skipped - ' + house.why); } catch (e) { problem(L, 'House picture: ' + e.message); }
+        if (L.imageUrl) { try { const ls = await fetchBlob(L.imageUrl, 2); await uploadPhotos([new File([ls], L.last + '_leadsheet.jpg', { type: 'image/jpeg' })]); okAny = true; } catch (e) { problem(L, 'Lead sheet picture: ' + e.message + ' - add it by hand'); } }
         try { const ov = await getOverviewPhoto(L); await uploadPhotos([new File([ov], L.last + '_overview.jpg', { type: 'image/jpeg' })]); okAny = true; } catch (e) { problem(L, 'Overview picture: ' + e.message); }
         if (house && house.blob) { try { await sleep(1500); await uploadPhotos([new File([house.blob], L.last + '_house.jpg', { type: 'image/jpeg' })]); okAny = true; } catch (e) { problem(L, 'House picture: ' + e.message); } }
         saveL(L);
@@ -1397,6 +1516,7 @@
           if (L.deadTries > 4) throw new Error('the old job still shows dead after Re-Open');
           await sleep(8000); location.reload(); return;
         }
+        if (L.plan.keepAppt) { progress(L, 'keeping the existing appointment…'); return go(L, 'rep', ''); }
         progress(L, 'setting the new initial appointment…');
         await setInitialAppt(L);
         return go(L, 'rep', '');
@@ -1417,9 +1537,10 @@
         try {
           if (L.plan.kind === 'revive') {
             if (!(await openNotesThread(['Lead Source:', 'Initial Appt'], true))) throw new Error('no message thread found to post the notes in');
-            await replyInThread('NEW LEAD INFO (' + new Date().toLocaleDateString('en-US') + ')\n' + L.notesText + '\n\nInitial Appt: ' + L.apptText);
+            await replyInThread('NEW LEAD INFO (' + new Date().toLocaleDateString('en-US') + ')\n' + L.notesText + '\n\n' + (L.plan.keepAppt ? 'Requested Appt (existing appointment NOT changed): ' : 'Initial Appt: ') + L.apptText);
           } else {
             if (!(await openNotesThread([src, L.notesText.split('\n')[1] || src], false))) throw new Error('notes message not found in Communications');
+            if (L.rawPost) await replyInThread(L.rawPost);
             await replyInThread(src + '\nInitial Appt: ' + L.apptText);
           }
           await replyInThread(CONFIG.SIGNATURE);
@@ -1438,7 +1559,7 @@
         L.step = 'sheet'; saveL(L);
       }
       if (L.step === 'sheet') {
-        const job = sheetJobFor(L);
+        const job = L.plan.keepAppt ? { skip: 'existing appointment kept - Lead Table not changed' } : sheetJobFor(L);
         if (job.skip) L.sheetNote = job.skip;
         else {
           progress(L, 'writing the Lead Table (' + job.dayLabel + ' ' + job.slotName + ')…');
@@ -1449,10 +1570,11 @@
         L.step = 'done'; saveL(L);
       }
       if (L.step === 'done') {
+        if (L.plan.kind === 'sold') problem(L, 'Previous customer ' + (L.crossRef || '') + ': add the QuickMeasure / Hover / EagleView reports to the new job by hand' + (L.plan.sellingRep ? ' (last sold by ' + L.plan.sellingRep + ', already in the notes)' : ''));
         if (L.plan.kind === 'revive' && L.plan.overYear) problem(L, 'Original job is over 1 year old - change its Lead Source to "' + L.leadSource + '"');
         const probs = L.problems || [];
         const what = L.plan.kind === 'revive' ? 'existing job updated' : 'entered';
-        progress(L, `${what}. ${L.sheetNote || ''}${probs.length ? ' | TO DO: ' + probs.join(' · ') : ''}`, { done: !probs.length, bad: probs.length > 0, jobId: L.jobId });
+        progress(L, `${what}. ${L.sheetNote || ''}${probs.length ? ' | TO DO: ' + probs.join(' · ') : ''}`, { done: !probs.length, bad: probs.length > 0, jobId: L.jobId, fin: true });
         const q = GM_getValue('mlf_queue', {}); delete q[L.id]; GM_setValue('mlf_queue', q);
         GM_deleteValue('mlf_active');
         showNote(`${L.first} ${L.last} ${what}.` + (probs.length ? ' TO DO: ' + probs.join(' · ') : ' You can close this tab.'), probs.length > 0);

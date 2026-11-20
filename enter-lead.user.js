@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.7.11
+// @version      6.0.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
-// @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply "entering" to the lead message, and comment "entered" when finished.
+// @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) – v6: with the Mars Lead Form script installed it opens that form pre-filled for review instead and reply "entering" to the lead message, and comment "entered" when finished.
 // @match        https://web.groupme.com/*
 // @match        https://my.acculynx.com/*
 // @match        https://www.google.com/maps/*
@@ -549,6 +549,39 @@
   }
 
 
+  /* ---------- v6: hand the parsed lead to the Mars Lead Form (a separate script on this same page) ----------
+     The two scripts can only share plain text on the page itself, so the lead travels as JSON in a data attribute plus a plain event. */
+  function formPayload(lead) {
+    const lines = notesFor(lead).split('\n'), line = k => ((lines.find(l => l.startsWith(k)) || '').slice(k.length)).trim();
+    const cd = callDate(lead), a = cd ? { date: cd, hasTime: false } : lead.appt;
+    const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    let apptDate = '', apptMin = null, cts = false;
+    if (a) { const d = new Date(a.date); apptDate = ymd(d); apptMin = a.hasTime ? a.h * 60 + a.m : 360; } else cts = true;      // no date at all = CTS (6 AM next work day)
+    return { id: lead.id, chatId: lead.chatId, sender: lead.sender, raw: lead.raw === '(lead sheet photo – no typed lead)' ? '' : lead.raw,
+      first: lead.photoOnly ? '' : lead.first, last: lead.photoOnly ? '' : lead.last, phone: lead.phone || '', email: lead.email || '', address: lead.address || '',
+      productText: /^na$/i.test(lead.productText || '') ? '' : (lead.productText || ''), concerns: callRequest(lead), age: ageOf(lead),
+      mrs: line('Mrs:'), mr: line('Mr:'), apptDate, apptMin, cts, imageUrl: lead.imageUrl || '' };
+  }
+  function handoffToForm(p) {
+    const de = document.documentElement;
+    return new Promise(resolve => {
+      let ok = false;
+      const onAck = () => { if (de.dataset.amosPrefillAck === p.id) { ok = true; document.removeEventListener('amos-prefill-ack', onAck); resolve(true); } };
+      document.addEventListener('amos-prefill-ack', onAck);
+      de.dataset.amosPrefillAck = ''; de.dataset.amosPrefill = JSON.stringify(p);
+      document.dispatchEvent(new Event('amos-prefill'));
+      setTimeout(() => { if (!ok) { document.removeEventListener('amos-prefill-ack', onAck); resolve(false); } }, 3500);
+    });
+  }
+  // the Lead Form says a lead is finished (or "reply only"): this script posts "entered" (or the reply text) in the rep's thread
+  document.addEventListener('amos-lead-done', () => {
+    let d = null; try { d = JSON.parse(document.documentElement.dataset.amosDone || 'null'); } catch (e) { /* ignore */ }
+    if (!d || !d.id) return;
+    const cur = GM_getValue('amos_post_entered', []) || [];
+    if (cur.some(x => x.id === d.id && x.text === d.text)) return;
+    GM_setValue('amos_post_entered', [...cur, { id: d.id, chatId: d.chatId, name: d.name || '', text: d.text || '' }]);
+  });
+
   // When "Enter Lead" is clicked on a message
   async function enterLead(node, btn) {
     // the CHAT TITLE is often a nickname or an autocorrect ("Melon Tea Keller"); the message's own
@@ -633,10 +666,17 @@
         const all = gmMessages(), k = all.findIndex(m => m.getAttribute('data-message-id') === id);
         for (let j = k + 1; j < all.length; j++) if (gmSender(all[j]) === sender && gmImage(all[j])) return gmImage(all[j]);
         return '';
-      }, CONFIG.imageWindowSeconds * 1000, 2000) || '';
-      if (!lead.imageUrl) log('No lead sheet photo arrived – entering without it.', true);
+      }, (document.documentElement.dataset.amosFormReady === '1' ? 6 : CONFIG.imageWindowSeconds) * 1000, 2000) || '';   // with the Lead Form open the lead shouldn't wait minutes for a photo
+      if (!lead.imageUrl) log('No lead sheet photo yet – continuing without it.', true);
     }
     lead.id = 'L' + node.getAttribute('data-message-id'); lead.chatId = currentChatId();
+    // v6: open the Mars Lead Form pre-filled with this lead (duplicate check runs there). If that script isn't installed/answering, fall back to the old automatic entry below.
+    if (await handoffToForm(formPayload(lead))) {
+      btn.textContent = 'Opened in Lead Form'; btn.disabled = false; btn.dataset.running = '';
+      log('Lead opened in the Mars Lead Form - review it there and press COMPLETE');
+      return;
+    }
+    log('Mars Lead Form did not answer - entering the lead automatically (old way)', true);
     // a re-click is a fresh run: forget anything left from the last attempt on this message
     ['amos_filled_', 'amos_step_', 'amos_comments_done_', 'amos_task_done_', 'amos_done_', 'amos_problems_'].forEach(k => GM_deleteValue(k + lead.id));
     if (GM_getValue(KEY_ACTIVE) === lead.id) GM_deleteValue(KEY_ACTIVE);
