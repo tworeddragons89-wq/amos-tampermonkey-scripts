@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.5.0
+// @version      1.5.1
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -781,22 +781,10 @@
 
     /* ---------- extra actions: Reply only / Save for later ---------- */
     const moreBox = el('div', `margin-top:8px;padding:8px;border:1px dashed ${LINE};border-radius:8px`);
-    moreBox.appendChild(el('div', `font-size:11px;font-weight:700;color:${MUTED};text-transform:uppercase;margin-bottom:4px`, 'Other options (no lead entered)'));
-    const replyRow = el('div', 'display:flex;gap:6px;margin-bottom:6px');
-    const replyTxt = el('input', inputCss + ';flex:1', null, { value: 'Out of area', placeholder: 'reply to the rep' });
-    const replyBtn = el('button', `border:0;border-radius:6px;background:${NAVY};color:#fff;padding:6px 10px;font:700 12px Arial;cursor:pointer`, 'REPLY ONLY');
-    replyBtn.title = 'Posts this text in the rep\'s GroupMe thread and enters nothing in AccuLynx (out of area, not a lead, etc.)';
-    replyRow.appendChild(replyTxt); replyRow.appendChild(replyBtn);
+    moreBox.appendChild(el('div', `font-size:11px;font-weight:700;color:${MUTED};text-transform:uppercase;margin-bottom:4px`, 'Other options'));
     const saveBtn = el('button', `width:100%;border:1px solid ${NAVY};border-radius:6px;background:#fff;color:${NAVY};padding:6px;font:700 12px Arial;cursor:pointer`, 'SAVE FOR LATER');
-    moreBox.appendChild(replyRow); moreBox.appendChild(saveBtn);
+    moreBox.appendChild(saveBtn);
     body.insertBefore(moreBox, statusEl);
-    replyBtn.onclick = () => {
-      if (!curPrefill) { status('Reply Only works on a lead that came from Enter Lead in GroupMe.', true); return; }
-      const t = clean(replyTxt.value); if (!t) { status('Type the reply first.', true); return; }
-      if (!confirm('Post "' + t + '" in the rep\'s thread and enter NOTHING in AccuLynx?')) return;
-      de.dataset.amosDone = JSON.stringify({ id: curPrefill.id, chatId: curPrefill.chatId, name: `${F.first.value} ${F.last.value}`.trim(), text: t }); document.dispatchEvent(new Event('amos-lead-done'));
-      status('Reply sent to Enter Lead - it posts "' + t + '" in the thread.'); curPrefill = null; setForm({}); 
-    };
     const savedEl = el('div', 'font-size:12px;margin-top:4px');
     moreBox.appendChild(savedEl);
     function paintSaved() {
@@ -1559,7 +1547,7 @@
         L.step = 'sheet'; saveL(L);
       }
       if (L.step === 'sheet') {
-        const job = L.plan.keepAppt ? { skip: 'existing appointment kept - Lead Table not changed' } : sheetJobFor(L);
+        const job = L.assign !== 'Mars 2' ? { skip: 'not assigned to Mars 2 - not put on the Lead Table' } : L.plan.keepAppt ? { skip: 'existing appointment kept - Lead Table not changed' } : sheetJobFor(L);
         if (job.skip) L.sheetNote = job.skip;
         else {
           progress(L, 'writing the Lead Table (' + job.dayLabel + ' ' + job.slotName + ')…');
