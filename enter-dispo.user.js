@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos - Enter Dispo
 // @namespace    amos-exteriors
-// @version      3.4
+// @version      3.5
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @description  Adds an "Enter Dispo" button to a rep's GroupMe messages. Click it, pick the rep's appointment (today or tomorrow, from the AccuLynx calendar), then choose "Got it" or "current": the message is posted as a comment on that job and your reply is typed in the thread.
@@ -413,8 +413,8 @@
     const slashDate = (d) => `${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} 00:00:00`;
     async function getAppointments(calId, includeTasks) {
       const now = new Date();
-      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2);     // today + tomorrow
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 3);   // v3.5: 3 days back (moved / earlier appointments)
+      const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 8);     // ... through 7 days ahead
       const raw = await acculynx('POST', '/api/v4/appointments/search', {
         CalendarIds: [calId], EventTypes: [1, 2], DateRange: { Start: slashDate(start), End: slashDate(end) }, Filters: []
       });
@@ -512,7 +512,7 @@
       const dayLabel = (iso) => {
         const now = new Date(); const t = isoOf(now); const tm = isoOf(new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1));
         const d = new Date(iso + 'T12:00:00');
-        return `${iso === t ? 'Today' : iso === tm ? 'Tomorrow' : ''} ${DOW[d.getDay()]} ${d.getMonth() + 1}/${d.getDate()}`.trim();
+        return `${iso === t ? 'Today' : iso === tm ? 'Tomorrow' : iso < t ? 'Past:' : ''} ${DOW[d.getDay()]} ${d.getMonth() + 1}/${d.getDate()}`.trim();
       };
       const render = () => {
         list.textContent = '';
@@ -553,10 +553,13 @@
         status.textContent = `Loading ${cal.name}'s appointments...`;
         try {
           appts = await getAppointments(cal.id, tasksBox.checked);
+          { const t0 = isoOf(new Date());                                   // today and later first (oldest first), then past days (newest first)
+            const up = appts.filter((a) => a.date >= t0), past = appts.filter((a) => a.date < t0).reverse();
+            appts = up.concat(past); }
           sel = bestAppt(appts, ctx.lead);
           status.textContent = appts.length
-            ? `${appts.length} appointment${appts.length === 1 ? '' : 's'} on ${cal.name}'s calendar (today and tomorrow). Tap the right one, then choose your reply.`
-            : `Nothing on ${cal.name}'s calendar for today or tomorrow. Try another calendar, "Show job tasks too", or the search option below.`;
+            ? `${appts.length} appointment${appts.length === 1 ? '' : 's'} on ${cal.name}'s calendar (today, the next 7 days, and the last 3 days). Tap the right one, then choose your reply.`
+            : `Nothing on ${cal.name}'s calendar for the last 3 days or the next 7. Try another calendar, "Show job tasks too", or the search option below.`;
           render();
         } catch (e) {
           status.textContent = 'Could not read AccuLynx (' + (e && e.message ? e.message : e) + '). Open https://my.acculynx.com/calendar in another tab and try again, or use the search option below.';
