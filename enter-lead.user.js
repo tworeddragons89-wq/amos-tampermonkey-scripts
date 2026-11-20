@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      5.7.10
+// @version      5.7.11
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) and reply "entering" to the lead message, and comment "entered" when finished.
@@ -173,7 +173,7 @@
         if (words.length) { lead.products.push(words.join(' / ')); return; }
       }
       if (PRODUCT_RE.test(l) && l.length < 60) {                                    // "130 sofit" → "sofit";  "Soffit/fascia Est" → "Soffit / Fascia"
-        const clean = l.replace(/^\d{1,4}(:\d{2})?\s*(am|pm|a|p)?\s+/i, '').replace(/\b(?:est(?:imates?)?|quotes?|inspections?)\b\.?/ig, ' ').replace(/\b(?:original|old|existing|current)\b/ig, ' ').replace(/(^|[\/,+&]\s*)\d{1,3}\s+(?=[A-Za-z])/g, '$1').replace(/\s+/g, ' ').trim();
+        const clean = l.replace(/^\d{1,4}(:\d{2})?\s*(am|pm|a|p)?\s+/i, '').replace(/\b(?:est(?:imates?)?|quotes?|inspections?)\b\.?/ig, ' ').replace(/\b(?:original|old|existing|current)\b/ig, ' ').replace(/[\s\-,(]*\b\d{1,3}\+?\s*(?:yrs?|years?)\b(?:\s*old)?\)?/ig, ' ').replace(/(^|[\/,+&]\s*)\d{1,3}\s+(?=[A-Za-z])/g, '$1').replace(/\s+/g, ' ').trim();
         const parts = clean.split(/\s*(?:\/|,|\+|&|\band\b)\s*/i).map(x => x.trim()).filter(Boolean);
         lead.products.push(parts.length > 1 && parts.every(x => x.length < 25) ? parts.map(titleCase).join(' / ') : (clean || l)); return; }
       const em = l.match(/[A-Za-z0-9._%+-]*[A-Za-z][A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/);
