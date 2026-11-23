@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AccuLynx - "24", "Any", "M", "!" and "CONF" Buttons
+// @name         AccuLynx - "24", "Any", "Verify", "M", "!" and "CONF" Buttons
 // @namespace    amos-exteriors
-// @version      3.3
-// @description  Adds small red buttons: "24" and "Any" on text-message boxes; one "M" button with a menu (M1 - PER TXT., M1 - PER ATT., M2 - CONF., M3 - NO CONT.) and one "!" button with a quick-notes menu (NA, NALVM, NAX2LVM, PL, PL!, RH) on comment boxes; and "CONF" above the Notes box when creating a lead. One click fills in the text.
+// @version      3.4
+// @description  Adds small red buttons: "24", "Any" and "Verify" on text-message boxes; one "M" button with a menu (M1 - PER TXT., M1 - PER ATT., M2 - CONF., M3 - NO CONT.) and one "!" button with a quick-notes menu (NA, NALVM, NAX2LVM, PL, PL!, RH) on comment boxes; and "CONF" above the Notes box when creating a lead. One click fills in the text.
 // @match        https://my.acculynx.com/*
 // @grant        none
 // @run-at       document-idle
@@ -151,6 +151,18 @@
     );
   }
 
+  // The "Verify" text: asks the customer to set up a time for someone to verify the project
+  async function buildVerifyMessage() {
+    const info = await fetchJobInfo();
+    const name = (info && info.firstName) || getFirstName() || '__________';
+    return (
+      'Hi ' + name + ' this is with Amos Exteriors reaching out regarding the project. ' +
+      'I was trying to get in touch with you to set up a time for someone to come by to verify the project ' +
+      'to make sure we have everything right for install. ' +
+      'When you get this message you can reply or give us a call. Thank you!'
+    );
+  }
+
   // ---------- The M3 comment (goes in COMMENT boxes, not text messages) ----------
 
   // Date a number of days from today, using the day the button is clicked.
@@ -261,15 +273,23 @@
         fillTextarea(ta, await buildNextDayMessage());
       });
 
-      const btnAny = makeButton('Any', 'Any appointment text', '0 16px 0 0');
+      const btnAny = makeButton('Any', 'Any appointment text', '0 6px 0 0');
       btnAny.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
         fillTextarea(ta, await buildAnyMessage());
       });
 
+      const btnVerify = makeButton('Verify', 'Verification text', '0 16px 0 0');
+      btnVerify.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        fillTextarea(ta, await buildVerifyMessage());
+      });
+
       clip.insertAdjacentElement('afterend', btn24);
       btn24.insertAdjacentElement('afterend', btnAny);
+      btnAny.insertAdjacentElement('afterend', btnVerify);
     });
   }
 
