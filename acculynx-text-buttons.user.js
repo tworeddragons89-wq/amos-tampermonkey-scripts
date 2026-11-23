@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AccuLynx - "24", "Any", "Verify", "M", "!" and "CONF" Buttons
 // @namespace    amos-exteriors
-// @version      3.4
+// @version      3.5
 // @description  Adds small red buttons: "24", "Any" and "Verify" on text-message boxes; one "M" button with a menu (M1 - PER TXT., M1 - PER ATT., M2 - CONF., M3 - NO CONT.) and one "!" button with a quick-notes menu (NA, NALVM, NAX2LVM, PL, PL!, RH) on comment boxes; and "CONF" above the Notes box when creating a lead. One click fills in the text.
 // @match        https://my.acculynx.com/*
 // @grant        none
@@ -254,11 +254,30 @@
     '.text-message-form textarea',                // new Text Message tab
   ].join(',');
 
+  function makeVerifyButton(ta) {
+    const btn = makeButton('Verify', 'Verification text', '0 16px 0 0');
+    btn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      fillTextarea(ta, await buildVerifyMessage());
+    });
+    return btn;
+  }
+
   function addButtons() {
     document.querySelectorAll(SMS_TEXTAREAS).forEach((ta) => {
       const box = ta.closest('.inline-form') || ta.closest('.text-message-form');
       if (!box) return;
-      if (box.querySelector('[' + BTN_ATTR + ']')) return; // already added
+      if (box.querySelector('[' + BTN_ATTR + '="Verify"]')) return; // already added
+
+      // If an older copy of this script already put "24" and "Any" here,
+      // just add "Verify" after "Any" instead of starting over.
+      const oldAny = box.querySelector('[' + BTN_ATTR + '="Any"]');
+      if (oldAny) {
+        oldAny.style.margin = '0 6px 0 0';
+        oldAny.insertAdjacentElement('afterend', makeVerifyButton(ta));
+        return;
+      }
 
       // Find the paper clip (Attachments) button in this same box
       const clip =
@@ -280,12 +299,7 @@
         fillTextarea(ta, await buildAnyMessage());
       });
 
-      const btnVerify = makeButton('Verify', 'Verification text', '0 16px 0 0');
-      btnVerify.addEventListener('click', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        fillTextarea(ta, await buildVerifyMessage());
-      });
+      const btnVerify = makeVerifyButton(ta);
 
       clip.insertAdjacentElement('afterend', btn24);
       btn24.insertAdjacentElement('afterend', btnAny);
