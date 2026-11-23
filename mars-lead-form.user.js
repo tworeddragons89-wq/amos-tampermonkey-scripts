@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.5.1
+// @version      1.5.2
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -489,7 +489,7 @@
     F.apptDate = el('input', inputCss + ';flex:1', null, { type: 'date' });
     F.apptTime = el('select', inputCss + ';flex:1');
     F.apptTime.appendChild(el('option', '', '- time -', { value: '' }));
-    for (let m = 8 * 60; m <= 20 * 60; m += 15) F.apptTime.appendChild(el('option', '', clock(m), { value: String(m) }));
+    for (let m = 6 * 60; m <= 20 * 60; m += 15) F.apptTime.appendChild(el('option', '', clock(m), { value: String(m) }));
     const ctsL = el('label', 'display:flex;align-items:center;gap:3px;font-size:12px;font-weight:700;white-space:nowrap;cursor:pointer');
     F.cts = el('input', '', null, { type: 'checkbox' }); ctsL.appendChild(F.cts); ctsL.appendChild(document.createTextNode('CTS'));
     apWrap.appendChild(F.apptDate); apWrap.appendChild(F.apptTime); apWrap.appendChild(ctsL);
@@ -1303,8 +1303,15 @@
     if (!chips().some(ch => txt(ch).includes(assignee))) {
       const inp = win.querySelector('input.ti-new-tag-input');
       if (!inp) throw new Error('"Find a person" box not found');
-      inp.focus(); inp.click(); setValue(inp, assignee.split(' ').slice(0, 2).join(' ')); await sleep(1200);
-      const opt = await waitFor(() => [...win.querySelectorAll('.ti-autocomplete li.ti-item')].find(e => visible(e) && txt(e).includes(assignee)), 8000);
+      // a tab opened in the background never gets real focus, so the list stays shut: fire the focus events ourselves and type the way a keyboard does
+      const findOpt = () => [...win.querySelectorAll('.ti-autocomplete li.ti-item')].find(e => visible(e) && txt(e).includes(assignee));
+      let opt = null;
+      for (let tryN = 0; tryN < 3 && !opt; tryN++) {
+        inp.focus(); inp.click(); inp.dispatchEvent(new FocusEvent('focus')); inp.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+        await typeInto(inp, assignee.split(' ').slice(0, 2).join(' ')); await sleep(1500);
+        opt = await waitFor(findOpt, 5000);
+        if (!opt) { setValue(inp, ''); await sleep(500); }
+      }
       if (!opt) throw new Error('"' + assignee + '" not in the Find-a-person list');
       for (const t of ['mouseenter', 'mouseover', 'mousedown', 'mouseup']) { try { opt.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true })); } catch (_) { /* ignore */ } }
       opt.click(); await sleep(700);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      6.0.0
+// @version      6.0.1
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) – v6: with the Mars Lead Form script installed it opens that form pre-filled for review instead and reply "entering" to the lead message, and comment "entered" when finished.
@@ -553,7 +553,7 @@
      The two scripts can only share plain text on the page itself, so the lead travels as JSON in a data attribute plus a plain event. */
   function formPayload(lead) {
     const lines = notesFor(lead).split('\n'), line = k => ((lines.find(l => l.startsWith(k)) || '').slice(k.length)).trim();
-    const cd = callDate(lead), a = cd ? { date: cd, hasTime: false } : lead.appt;
+    const cd = callDate(lead), a = (lead.appt && lead.appt.hasTime) ? lead.appt : cd ? { date: cd, hasTime: false } : lead.appt;   // a real appointment WITH a time wins; "call Monday" only sets the day when no time was given (the call request still goes in Concerns)
     const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
     let apptDate = '', apptMin = null, cts = false;
     if (a) { const d = new Date(a.date); apptDate = ymd(d); apptMin = a.hasTime ? a.h * 60 + a.m : 360; } else cts = true;      // no date at all = CTS (6 AM next work day)
