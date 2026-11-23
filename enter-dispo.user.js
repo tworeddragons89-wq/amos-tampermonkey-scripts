@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos - Enter Dispo
 // @namespace    amos-exteriors
-// @version      3.5
+// @version      3.6
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @description  Adds an "Enter Dispo" button to a rep's GroupMe messages. Click it, pick the rep's appointment (today or tomorrow, from the AccuLynx calendar), then choose "Got it" or "current": the message is posted as a comment on that job and your reply is typed in the thread.
@@ -229,6 +229,30 @@
     if (!scored.length) return -1;
     if (scored.length > 1 && scored[1].s === scored[0].s) return -1;
     return scored[0].i;
+  }
+  // Most likely appointment for a dispo. Returns { i, why } or { i: -1 }.
+  // 1) name / address / job # match  2) a time named in the message ("my 2", "3:30pm") on today's calendar
+  // 3) the appointment going on right now  4) the next one today
+  function likelyAppt(appts, lead, text, now) {
+    const b = bestAppt(appts, lead);
+    if (b >= 0) return { i: b, why: 'matches the name / address in the message' };
+    const today = isoOf(now), nowMin = now.getHours() * 60 + now.getMinutes();
+    const tm = String(text || '').match(/\b(?:my|the|at|@)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b(?!\s*(?:leads?|appts?|appointments?|calls?|ft|feet|inch|%|k\b))/i);
+    if (tm) {
+      let h = +tm[1]; const mi = tm[2] ? +tm[2] : 0;
+      if (h >= 1 && h <= 12 && mi < 60) {
+        const hs = tm[3] ? [(h % 12) + (/pm/i.test(tm[3]) ? 12 : 0)] : (h >= 8 && h <= 11 ? [h] : [(h % 12) + 12]);
+        const hit = appts.map((a, i) => ({ a, i })).filter((x) => x.a.date === today && x.a.type === 2 && hs.some((hh) => Math.abs(x.a.sMin - (hh * 60 + mi)) <= 20));
+        if (hit.length === 1) return { i: hit[0].i, why: 'matches the time in the message' };
+      }
+    }
+    const td = appts.map((a, i) => ({ a, i })).filter((x) => x.a.date === today && x.a.type === 2 && !x.a.cxl);
+    const cur = td.filter((x) => nowMin >= x.a.sMin - 30 && nowMin <= x.a.eMin);
+    if (cur.length) return { i: cur[cur.length - 1].i, why: 'on the calendar right now' };
+    const nxt = td.filter((x) => x.a.sMin > nowMin).sort((x, y) => x.a.sMin - y.a.sMin)[0];
+    if (nxt) return { i: nxt.i, why: 'next one on the calendar today' };
+    const last = td.sort((x, y) => y.a.sMin - x.a.sMin)[0];
+    return last ? { i: last.i, why: 'last one on the calendar today' } : { i: -1 };
   }
   // A one-line message ("running late to my 2") has no "last lines" - use the whole line to spot a repeat.
   const oneLineKey = (text) => { const l = text.split('\n').map((x) => x.trim()).filter(Boolean); return l.length === 1 && l[0].length >= 12 ? l[0] : ''; };
@@ -504,7 +528,7 @@
       box.appendChild(head); box.appendChild(status); box.appendChild(list); box.appendChild(foot);
       ov.appendChild(box); document.body.appendChild(ov);
 
-      let calendars = [], appts = [], sel = -1;
+      let calendars = [], appts = [], sel = -1, likely = { i: -1 };
       const updateButtons = () => {
         const ok = textBox.checked || sel >= 0;
         [bGot, bCur].forEach((b) => { b.disabled = !ok; b.style.opacity = ok ? '1' : '.45'; });
@@ -517,8 +541,12 @@
       const render = () => {
         list.textContent = '';
         let lastDay = '';
-        appts.forEach((a, i) => {
-          if (a.date !== lastDay) { lastDay = a.date; list.appendChild(el('div', 'margin:10px 4px 4px;font-weight:bold;font-size:12px;color:#0a6cff;text-transform:uppercase', dayLabel(a.date))); }
+        const order = appts.map((a, i) => i);
+        if (likely.i >= 0) { order.splice(order.indexOf(likely.i), 1); order.unshift(likely.i); }     // most likely match goes first
+        order.forEach((i) => {
+          const a = appts[i];
+          if (i === likely.i) list.appendChild(el('div', 'margin:10px 4px 4px;font-weight:bold;font-size:12px;color:#d97706;text-transform:uppercase', '★ Most likely match — ' + likely.why));
+          else if (a.date !== lastDay) { lastDay = a.date; list.appendChild(el('div', 'margin:10px 4px 4px;font-weight:bold;font-size:12px;color:#0a6cff;text-transform:uppercase', dayLabel(a.date))); }
           const on = i === sel && !textBox.checked;
           const row = el('div', `border:2px solid ${on ? '#0a6cff' : '#e3e3e3'};background:${on ? '#eaf2ff' : '#fff'};border-radius:8px;padding:8px 10px;margin:4px 0;cursor:pointer`);
           row.appendChild(el('div', 'font-weight:bold', a.name + (a.cxl ? '  (CXL)' : '') + (a.type === 1 ? '  [task: ' + a.title + ']' : '')));
@@ -556,7 +584,7 @@
           { const t0 = isoOf(new Date());                                   // today and later first (oldest first), then past days (newest first)
             const up = appts.filter((a) => a.date >= t0), past = appts.filter((a) => a.date < t0).reverse();
             appts = up.concat(past); }
-          sel = bestAppt(appts, ctx.lead);
+          likely = likelyAppt(appts, ctx.lead, ctx.text, new Date()); sel = likely.i;
           status.textContent = appts.length
             ? `${appts.length} appointment${appts.length === 1 ? '' : 's'} on ${cal.name}'s calendar (today, the next 7 days, and the last 3 days). Tap the right one, then choose your reply.`
             : `Nothing on ${cal.name}'s calendar for the last 3 days or the next 7. Try another calendar, "Show job tasks too", or the search option below.`;
