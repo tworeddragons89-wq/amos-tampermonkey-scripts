@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.6.2
+// @version      1.7.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -1559,6 +1559,8 @@
         await sleep(2500);
         progress(L, 'assigning ' + L.assign + '…');
         try { await assignRep(L.assign); } catch (e) { problem(L, 'Assign to ' + L.assign + ': ' + e.message + ' - do it by hand'); }
+        // existing (revived / duplicate) jobs also get the Street View + overview pictures, same as a new lead
+        if (L.plan.kind === 'revive' && !L.photosDone) { L.photosDone = true; saveL(L); return go(L, 'photos', '/jobphotos'); }
         return go(L, 'comments', '/communications');
       }
       if (L.step === 'comments') {
