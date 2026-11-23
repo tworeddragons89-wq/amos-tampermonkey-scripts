@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      6.0.2
+// @version      6.1.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) – v6: with the Mars Lead Form script installed it opens that form pre-filled for review instead and reply "entering" to the lead message, and comment "entered" when finished.
@@ -86,7 +86,7 @@
 
   /* ===================== LEAD PARSING ===================== */
   const titleCase = s => s.split(/(\s+)/).map(w => /^[A-Z][a-z]+[A-Z][a-z]+$/.test(w) ? w : w.toLowerCase().replace(/\b([a-z])/g, c => c.toUpperCase())).join('').replace(/\bAnd\b/g, 'and');   // keeps McDonald / DeWitt
-  const PRODUCT_RE = /roof|storm|hail|hardie|hardi\b|vinyl siding|gutter|guard|gaurd|siding|sof+it+|fa[sc]+ia|\btrim\b|window|door|insulation|masonry/i;
+  const PRODUCT_RE = /roof|storm|hail|hardie|hardi\b|vinyl siding|gutter|guard|gaurd|siding|sof+it+|fa[sc]+ia|\btrim\b|window|door|insulation|masonry|chimney|brick|tuck-?point/i;
 
   // GroupMe leaves invisible markers in pasted text (\uFFFC from attachments, zero-width and bidi marks).
   // They survive into names and file names, so scrub them before anything else looks at the message.
@@ -378,7 +378,7 @@
     if (/siding|hardie|\bhardi\b/.test(t)) out.push('Siding / Soffit / Fascia');
     if (/window|door/.test(t)) out.push('Doors / Windows');
     if (/insulation/.test(t)) out.push('Insulation');
-    if (/masonry/.test(t)) out.push('Masonry');
+    if (/masonry|chimney|brick|tuck/.test(t)) out.push('Masonry');
     return out.length ? out : ['Repairs'];
   }
   // Mrs / Mr lines: use the phone labels ("wife", "husband", "Donna’s"); any number we can't place goes on Mr or Mrs as "Name 765-…"
@@ -556,13 +556,16 @@
      The two scripts can only share plain text on the page itself, so the lead travels as JSON in a data attribute plus a plain event. */
   function formPayload(lead) {
     const lines = notesFor(lead).split('\n'), line = k => ((lines.find(l => l.startsWith(k)) || '').slice(k.length)).trim();
-    const cd = callDate(lead), a = (lead.appt && lead.appt.hasTime) ? lead.appt : cd ? { date: cd, hasTime: false } : lead.appt;   // a real appointment WITH a time wins; "call Monday" only sets the day when no time was given (the call request still goes in Concerns)
+    const cd = callDate(lead); let a = (lead.appt && lead.appt.hasTime) ? lead.appt : cd ? { date: cd, hasTime: false } : lead.appt;   // a real appointment WITH a time wins; "call Monday" only sets the day when no time was given (the call request still goes in Concerns)
     const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-    let apptDate = '', apptMin = null, cts = false;
+    let apptDate = '', apptMin = null, cts = false, concerns = callRequest(lead);
+    // "1/6 (CALL) 2pm or 6pm": the rep wants a CALL on that date, not a booked time -> 6 AM that day, her wording goes in Concerns
+    const callLine = (lead.raw || '').split(/\r?\n/).find(l => /\(\s*call\s*\)|\bcall\b/i.test(l) && /\d{1,2}\/\d{1,2}/.test(l));
+    if (callLine && lead.appt && !cd) { a = { date: lead.appt.date, hasTime: false }; concerns = 'Call ' + callLine.replace(/\(\s*call\s*\)/ig, '').replace(/\bcall\b/ig, '').replace(/\s+/g, ' ').trim(); }
     if (a) { const d = new Date(a.date); apptDate = ymd(d); apptMin = a.hasTime ? a.h * 60 + a.m : 360; } else cts = true;      // no date at all = CTS (6 AM next work day)
     return { id: lead.id, chatId: lead.chatId, sender: lead.sender, raw: lead.raw === '(lead sheet photo – no typed lead)' ? '' : lead.raw,
       first: lead.photoOnly ? '' : lead.first, last: lead.photoOnly ? '' : lead.last, phone: lead.phone || '', email: lead.email || '', address: lead.address || '',
-      productText: /^na$/i.test(lead.productText || '') ? '' : (lead.productText || ''), concerns: callRequest(lead), age: ageOf(lead),
+      productText: /^na$/i.test(lead.productText || '') ? '' : (lead.productText || ''), concerns, age: ageOf(lead),
       mrs: line('Mrs:'), mr: line('Mr:'), apptDate, apptMin, cts, imageUrl: lead.imageUrl || '' };
   }
   function handoffToForm(p) {

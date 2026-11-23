@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.5.2
+// @version      1.6.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -814,6 +814,28 @@
        - Check for Duplicate: open Street View of the house by clicking Google's own Street View picture
        - AccuLynx photos: hand back the Street View picture of the house
      ====================================================================================== */
+  // Street View tab (opened by the house-photo step): find the street picture panorama nearest the house and aim it AT the house
+  if (location.host === 'www.google.com' && /^\/maps\/@/.test(location.pathname) && /map_action=pano|3a,/.test(location.href)) {
+    (async () => {
+      const req = GM_getValue('mlf_pano_req');
+      if (!req || Date.now() - req.t > 90000) return;
+      const fin = v => GM_setValue('mlf_pano_res', Object.assign({ id: req.id, t: Date.now() }, v));
+      try {
+        const ok = await waitFor(() => /!1s[A-Za-z0-9_-]{20,24}!/.test(location.href) && /@-?\d+\.\d+,-?\d+\.\d+,/.test(location.href), 25000, 400);
+        if (!ok) return fin({ none: true, why: 'no street picture within reach' });
+        const pid = location.href.match(/!1s([A-Za-z0-9_-]{20,24})!/)[1];
+        const at = location.href.match(/@(-?\d+\.\d+),(-?\d+\.\d+),/);
+        const la1 = +at[1], lo1 = +at[2], rad = x => x * Math.PI / 180;
+        const dy = rad(req.lat - la1), dx = rad(req.lon - lo1) * Math.cos(rad(la1));
+        const dist = Math.sqrt(dx * dx + dy * dy) * 6371000;
+        if (dist > 150) return fin({ none: true, why: 'nearest street picture is ' + Math.round(dist) + ' m from the house' });
+        const yaw = ((Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360;       // compass bearing from the camera to the house
+        const url = 'https://streetviewpixels-pa.googleapis.com/v1/thumbnail?panoid=' + pid + '&cb_client=maps_sv.tactile&w=1600&h=940&yaw=' + yaw.toFixed(1) + '&pitch=0&thumbfov=80';
+        fin({ b64: await blobToB64(await fetchBlob(url)) });
+      } catch (e) { fin({ none: true, why: 'street picture failed: ' + e.message }); }
+    })();
+    return;
+  }
   if (location.host === 'www.google.com' && /^\/maps\/place\//.test(location.pathname)) {
     (async () => {
       const sv = GM_getValue('mlf_sv_req', null);
@@ -832,6 +854,15 @@
       await waitFor(() => /!3d-?\d+\.\d+!4d-?\d+\.\d+/.test(location.href), 12000, 300);
       const pin = location.href.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/) || location.href.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
       const done = v => GM_setValue('mlf_house_res', Object.assign({ id: req.id, t: Date.now() }, pin ? { lat: +pin[1], lon: +pin[2] } : {}, v));
+      // FIRST CHOICE: the real street-level picture aimed at the house (Andrew: always use Street View when Google has it)
+      if (pin) {
+        GM_deleteValue('mlf_pano_res'); GM_setValue('mlf_pano_req', { id: req.id, lat: +pin[1], lon: +pin[2], t: Date.now() });
+        const ptab = GM_openInTab('https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=' + pin[1] + ',' + pin[2], { active: false, insert: true });
+        const pr = await waitFor(() => { const v = GM_getValue('mlf_pano_res'); return v && v.id === req.id ? v : null; }, 40000, 500);
+        try { ptab.close(); } catch (e) { /* ignore */ }
+        GM_deleteValue('mlf_pano_req');
+        if (pr && pr.b64) return done({ b64: pr.b64 });
+      }
       if (!img || !/streetviewpixels-pa\.googleapis\.com|googleusercontent\.com/.test(img.src)) return done({ none: true, why: 'Google has no Street View photo of this address' });
       try {
         const big = img.src.replace(/([?&])w=\d+/, '$1w=1600').replace(/([?&])h=\d+/, '$1h=940').replace(/=w\d+-h\d+/, '=w1600-h940');
