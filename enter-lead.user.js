@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      6.1.0
+// @version      6.1.1
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) – v6: with the Mars Lead Form script installed it opens that form pre-filled for review instead and reply "entering" to the lead message, and comment "entered" when finished.
@@ -566,6 +566,7 @@
     return { id: lead.id, chatId: lead.chatId, sender: lead.sender, raw: lead.raw === '(lead sheet photo – no typed lead)' ? '' : lead.raw,
       first: lead.photoOnly ? '' : lead.first, last: lead.photoOnly ? '' : lead.last, phone: lead.phone || '', email: lead.email || '', address: lead.address || '',
       productText: /^na$/i.test(lead.productText || '') ? '' : (lead.productText || ''), concerns, age: ageOf(lead),
+      notes: [(lead.phones2 || []).filter(p => p.num && !/wife|husband|\bmrs?\b/i.test(p.label || '')).length ? [{ num: lead.phone, label: lead.phoneLabel || '' }, ...(lead.phones2 || [])].filter(p => p.num).map(p => (p.label ? titleCase(p.label.replace(/[()]/g, '').replace(/:$/, '').trim()) + ': ' : '') + p.num.replace(/^(\d{3})(\d{3})(\d{4})$/, '$1-$2-$3')).join(' | ') : '', (lead.extra || []).filter(x => /\b(retired|home|mornings?|evenings?|afternoons?|weekends?|talk to|speak to|ask for|dog|gate|key)\b/i.test(x)).join(' ')].filter(Boolean).join('. '),
       mrs: line('Mrs:'), mr: line('Mr:'), apptDate, apptMin, cts, imageUrl: lead.imageUrl || '' };
   }
   function handoffToForm(p) {

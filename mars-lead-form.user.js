@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.6.1
+// @version      1.6.2
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -736,11 +736,18 @@
     de.dataset.amosFormReady = '1';
     const PROD_RE = [['Roof', /roof/i], ['Gutters', /gutter|guard|gaurd/i], ['Siding', /siding|hardie|hardi\b/i], ['Soffit/Fascia', /soffit|sofit|fascia|\btrim\b/i],
       ['Windows', /window/i], ['Doors', /\bdoors?\b/i], ['Insulation', /insul/i], ['Masonry', /mason|brick|chimney/i], ['Repairs', /repair|leak/i]];
+    const OTHER_RE = [/shutter/i, /\bdecks?\b/i, /fence/i];
     function pickSource(rep) {
       const n = x => String(x || '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
       const want = n(rep), opts = [...srcSel.options].filter(o => o.value);
       let o = opts.find(o => n(o.textContent).endsWith(want)) ||
               opts.find(o => /field marketing/i.test(o.textContent) && want && want.split(' ').every(t => n(o.textContent).includes(t)));
+      // the rep's GroupMe name can be spelled differently from AccuLynx ("Zack" / "Zach"): fall back to the LAST name inside "Field Marketing: ..."
+      if (!o && want) {
+        const last = want.split(' ').pop(), first = want.split(' ')[0];
+        const cands = opts.filter(x => /^field marketing: /i.test(x.textContent) && n(x.textContent).split(' ').pop() === last);
+        o = cands.find(x => n(x.textContent).includes(first.slice(0, 2))) || (cands.length === 1 ? cands[0] : null);
+      }
       return o ? o.value : '';
     }
     function setForm(v) {
@@ -758,8 +765,8 @@
       if (!p || !p.id) return;
       curPrefill = p;
       const prods = PROD_RE.filter(([, re]) => re.test(p.productText || '')).map(x => x[0]);
-      setForm({ first: p.first, last: p.last, phone: p.phone, email: p.email, address: p.address, products: prods, productOther: prods.length ? '' : (p.productText || ''),
-        concerns: p.concerns, age: p.age, mrs: p.mrs, mr: p.mr, notes: '', workType: 'Retail', assign: 'Needs Confirmed',
+      setForm({ first: p.first, last: p.last, phone: p.phone, email: p.email, address: p.address, products: prods, productOther: [...(prods.length ? [] : [p.productText || '']), ...OTHER_RE.filter(re => re.test(p.raw || '')).map(re => ((p.raw.match(re) || [''])[0]).replace(/^./, c => c.toUpperCase()))].filter(Boolean).join(', '),
+        concerns: p.concerns, age: p.age, mrs: p.mrs, mr: p.mr, notes: p.notes || '', workType: 'Retail', assign: 'Needs Confirmed',
         apptDate: p.apptDate, apptMin: p.apptMin, cts: !!p.cts });
       panel.style.display = 'block'; place();
       de.dataset.amosPrefillAck = p.id; document.dispatchEvent(new Event('amos-prefill-ack'));      // tells Enter Lead the form took the lead
