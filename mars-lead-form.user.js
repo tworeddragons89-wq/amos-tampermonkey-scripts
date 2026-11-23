@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.6.0
+// @version      1.6.1
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -655,7 +655,7 @@
       const plan = planForPick(chk.pick, chk.mode);
       if (!chk.pick && chk.mode !== 'new' && chk.dup.plan.kind !== 'new' && !confirm(`AccuLynx found a likely duplicate (${chk.dup.plan.name || 'same house'}), but no DUPLICATE box is ticked.\n\nOK = enter it as a NEW lead anyway\nCancel = go back and tick the matching record`)) return;
       const mins = f.workType === 'Insurance' ? CONFIG.INSURANCE_HOURS * 60 : CONFIG.RETAIL_HOURS * 60;
-      const end = new Date(start.getTime() + (f.cts ? 60 : mins) * 60e3);
+      const end = new Date(start.getTime() + (f.cts || start.getHours() === 6 ? 60 : mins) * 60e3);   // CTS / a 6 AM call slot is 1 hour
       const tf = d => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
       const L = Object.assign({}, f, {
         id: 'M' + Date.now(), queuedAt: Date.now(),
@@ -1354,7 +1354,7 @@
     const save = [...win.querySelectorAll('button')].filter(visible).find(b => /^create$/i.test(txt(b)) && !b.disabled);
     if (!save) throw new Error('task Create button not found');
     save.click();
-    if (!await waitFor(() => !dlg(), 15000)) throw new Error('task was not confirmed');
+    if (!await waitFor(() => !dlg(), 15000)) { await sleep(3000); if (!(await waitFor(() => [...document.querySelectorAll('a,span,div')].some(e => visible(e) && e.children.length === 0 && txt(e) === title), 8000))) throw new Error('task was not confirmed'); }
     await sleep(1200);
   }
 
