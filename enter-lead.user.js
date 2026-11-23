@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      6.0.1
+// @version      6.0.2
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) – v6: with the Mars Lead Form script installed it opens that form pre-filled for review instead and reply "entering" to the lead message, and comment "entered" when finished.
@@ -311,6 +311,9 @@
     return { date, hasTime: true, h, m };
   }
   function parseAppt(text) {
+    // "12/2 @ four Wednesday" -> "12/2 @ 4 Wednesday" (a spelled-out hour after @ / at)
+    { const NW = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, noon: 12 };
+      text = text.replace(/(@|\bat)\s*(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon)\b/gi, (m, a, w) => a + ' ' + NW[w.toLowerCase()] + (/noon/i.test(w) ? ' pm' : '')); }
     const d = text.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/) ||
               text.match(/(?<![\d-])(1[0-2]|0?[1-9])-([12]\d|3[01]|0?[1-9])-(\d{2,4})(?!\d)/) ||     // "11-17-26"
               text.match(/(?<![\d-])(1[0-2]|0?[1-9])-([12]\d|3[01]|0?[1-9])(?![\d-])()/);   // "11-7"
