@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Enter Lead (GroupMe → AccuLynx)
 // @namespace    amos-exteriors
-// @version      6.1.1
+// @version      6.2.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-lead.user.js
-// @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments, @Me Mars 1 & 2) – v6: with the Mars Lead Form script installed it opens that form pre-filled for review instead and reply "entering" to the lead message, and comment "entered" when finished.
+// @description  Adds an "Enter Lead" button under every lead message in GroupMe. Click it to enter THAT lead into AccuLynx (Needs Confirmed, notes, photo, comments) – v6: with the Mars Lead Form script installed it opens that form pre-filled for review instead and reply "entering" to the lead message, and comment "entered" when finished.
 // @match        https://web.groupme.com/*
 // @match        https://my.acculynx.com/*
 // @match        https://www.google.com/maps/*
@@ -38,7 +38,7 @@
     replyEntering: 'entering',
     replyEntered: 'entered',
     signatureComment: 'Claude',
-    notifyUsers: [],                                          // no @Me tags any more – a TASK for Mars 1 is created instead
+    notifyUsers: [],                                          // no @Me tags and no task for Mars 1 any more
     taskTitle: 'Claude Automated Lead',                       // task created on every entered lead …
     taskAssignee: 'Mars 1 (Resets)',                          // … assigned to Mars 1 only
 
@@ -1393,13 +1393,7 @@
     }
     if (step === 'task') {
       if (GM_getValue('amos_task_done_' + lead.id)) { GM_setValue(stepKey, 'tag'); return finishJob(lead, jobId); }   // never twice
-      GM_setValue('amos_task_done_' + lead.id, true);                     // ONE attempt only – a half-finished try must not create a second task
-      await sleep(2500);
-      try { await createTask(CONFIG.taskTitle, CONFIG.taskAssignee); log('Task "' + CONFIG.taskTitle + '" created for ' + CONFIG.taskAssignee); }
-      catch (e) {
-        const pr = GM_getValue('amos_problems_' + lead.id, []); pr.push('Task NOT created (' + e.message + ') – create "' + CONFIG.taskTitle + '" for ' + CONFIG.taskAssignee + ' by hand'); GM_setValue('amos_problems_' + lead.id, pr);
-        log('Task: ' + e.message, true);
-      }
+      // no task for Mars 1 any more (removed on request)
       GM_setValue(stepKey, 'tag');
       return finishJob(lead, jobId);
     }

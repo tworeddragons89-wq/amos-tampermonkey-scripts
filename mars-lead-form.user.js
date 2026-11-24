@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.7.0
+// @version      1.8.0
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -46,11 +46,11 @@
   3. Fill in the rest and press COMPLETE. The form clears for the next lead and the work runs by itself:
        NEW LEAD   -> AccuLynx Create Lead (notes template, trades, appointment, assigned to Mars 1 /
                      Needs Confirmed / Mars 2), Save, house + overview pictures, house picture on Location
-                     Info, "Lead Source / Initial Appt" and "Claude" replies, task "Claude Automated Lead" for Mars 1.
+                     Info, "Lead Source / Initial Appt" and "Claude" replies.
        DUPLICATE  -> every AccuLynx record found has a link (opens in a background tab, the form stays open) and a
                      DUPLICATE box. Tick the box on the matching record (the likely one says "suggested"):
                      Lead / Prospect / Dead job -> that job is used: re-opened if dead, new initial appointment,
-                     assigned, the filled-out lead report posted in its comments, task for Mars 1, Lead Table.
+                     assigned, the filled-out lead report posted in its comments, Lead Table.
                      SOLD job (Approved / Completed / Invoiced / Closed) -> a NEW lead with the IN number in
                      Cross Reference. No box ticked = NEW lead (Complete asks first if a likely duplicate was found).
        ROOF ONLY  -> when the address is in a roof-only zone, every product other than Roof (ticked or typed in
@@ -1585,12 +1585,7 @@
       }
       if (L.step === 'task') {
         if (!overview()) return go(L, 'task', '');
-        if (!L.taskDone) {
-          L.taskDone = true; saveL(L);                                       // one try only - never two tasks
-          progress(L, 'creating the task for Mars 1…');
-          await sleep(2500);
-          try { await createTask(CONFIG.TASK_TITLE, CONFIG.TASK_ASSIGNEE); } catch (e) { problem(L, 'Task not created (' + e.message + ') - create "' + CONFIG.TASK_TITLE + '" for Mars 1 by hand'); }
-        }
+        // no task for Mars 1 any more (removed on request)
         L.step = 'sheet'; saveL(L);
       }
       if (L.step === 'sheet') {
