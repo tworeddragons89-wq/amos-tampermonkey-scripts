@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amos - Enter Dispo
 // @namespace    amos-exteriors
-// @version      3.6
+// @version      3.7
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/enter-dispo.user.js
 // @description  Adds an "Enter Dispo" button to a rep's GroupMe messages. Click it, pick the rep's appointment (today or tomorrow, from the AccuLynx calendar), then choose "Got it" or "current": the message is posted as a comment on that job and your reply is typed in the thread.
@@ -109,6 +109,7 @@
     const lastFirst = /^[A-Za-z'’.\-]+(\s[A-Za-z'’.\-]+)?\s*,\s*[A-Za-z]/;   // "Doe, Jane and John" / "Smith , Anna"
     const headerLine = lines.slice(0, 3).find((l) => /^IN[-\s]?\d{3,6}\s*[:\-]?\s*[A-Za-z]/.test(l));   // "IN-4521 Jane Doe"
     let nameLine = headerLine || lines.slice(0, 6).find((l) => lastFirst.test(l) && !isCityLine(l) && !/^\w+:/.test(l));
+    let hasName = !!nameLine;                                    // a real name line (header / "Last, First"), not a guess
     if (!nameLine) {
       nameLine = lines.find((l) => !/^\d/.test(l) && !/:\s*$/.test(l) && !/^(customer|job|lead|product|demo|price|payment)/i.test(l));
     }
@@ -136,7 +137,7 @@
     // not always searchable in AccuLynx (a lead can carry it only inside its emails), so the
     // address and then the name must be able to find the job.
     const alts = [addrFull, nameSearch].filter((s, i, a) => s && s !== search && a.indexOf(s) === i);
-    return { jobNum, search, alts, tokens, addr };
+    return { jobNum, search, alts, tokens, addr, hasName };
   }
   // A line of the dispo that is distinctive enough to tell if it is already on the job.
   // Only the LAST lines count: that is where the rep writes the result. Everything above
@@ -236,6 +237,20 @@
   function likelyAppt(appts, lead, text, now) {
     const b = bestAppt(appts, lead);
     if (b >= 0) return { i: b, why: 'matches the name / address in the message' };
+    // Several equally good matches (e.g. a demo and a later contract sign-up for the same customer):
+    // prefer the one on a date named in the message ("Thursday 12/3"), else the one closest to today.
+    const sc = appts.map((a, i) => ({ i, a, s: scoreAppt(a, lead) })).filter((x) => x.s >= 70);
+    if (sc.length) {
+      const top = Math.max(...sc.map((x) => x.s)); const ties = sc.filter((x) => x.s === top);
+      const dm = String(text || '').match(/\b(\d{1,2})\/(\d{1,2})\b/);
+      const byDate = dm ? ties.filter((x) => x.a.date.slice(5) === `${pad2(+dm[1])}-${pad2(+dm[2])}`) : [];
+      if (byDate.length) return { i: byDate[0].i, why: 'matches the name / address and the date in the message' };
+      const t0 = new Date(isoOf(now) + 'T12:00:00').getTime();
+      ties.sort((x, y) => Math.abs(new Date(x.a.date + 'T12:00:00') - t0) - Math.abs(new Date(y.a.date + 'T12:00:00') - t0) || x.a.sMin - y.a.sMin);
+      return { i: ties[0].i, why: 'matches the name / address in the message (closest to today)' };
+    }
+    // The message names a customer but nothing on the calendar matches: do NOT guess by time.
+    if ((lead && ((lead.hasName && lead.tokens && lead.tokens.length >= 2) || lead.addr || lead.jobNum))) return { i: -1, named: true };
     const today = isoOf(now), nowMin = now.getHours() * 60 + now.getMinutes();
     const tm = String(text || '').match(/\b(?:my|the|at|@)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b(?!\s*(?:leads?|appts?|appointments?|calls?|ft|feet|inch|%|k\b))/i);
     if (tm) {
@@ -438,11 +453,11 @@
     async function getAppointments(calId, includeTasks) {
       const now = new Date();
       const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 3);   // v3.5: 3 days back (moved / earlier appointments)
-      const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 8);     // ... through 7 days ahead
+      const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 46);    // v3.7: fetch 45 days ahead (a contract sign-up can be weeks away); the picker only SHOWS far-away ones that match the message
       const raw = await acculynx('POST', '/api/v4/appointments/search', {
         CalendarIds: [calId], EventTypes: [1, 2], DateRange: { Start: slashDate(start), End: slashDate(end) }, Filters: []
       });
-      return normalizeAppts(raw, includeTasks);
+      return normalizeAppts(raw, true);                                                // job tasks too; the picker decides which to show
     }
 
     // ---------- Start the entry: open the job (or search) in AccuLynx; the reply word comes from the button chosen ----------
@@ -584,10 +599,13 @@
           { const t0 = isoOf(new Date());                                   // today and later first (oldest first), then past days (newest first)
             const up = appts.filter((a) => a.date >= t0), past = appts.filter((a) => a.date < t0).reverse();
             appts = up.concat(past); }
+          { const t0 = isoOf(new Date()), lim = isoOf(new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() + 7));
+            appts = appts.filter((a) => { const m = scoreAppt(a, ctx.lead) >= 70; return (m || a.type === 2 || tasksBox.checked) && (m || a.date <= lim); }); }
           likely = likelyAppt(appts, ctx.lead, ctx.text, new Date()); sel = likely.i;
           status.textContent = appts.length
             ? `${appts.length} appointment${appts.length === 1 ? '' : 's'} on ${cal.name}'s calendar (today, the next 7 days, and the last 3 days). Tap the right one, then choose your reply.`
             : `Nothing on ${cal.name}'s calendar for the last 3 days or the next 7. Try another calendar, "Show job tasks too", or the search option below.`;
+          if (likely.named && appts.length) status.textContent = `Nothing on ${cal.name}'s calendar matches the name / address in this message, so nothing is pre-selected. Check the list, try another calendar, or use the search option below.`;
           render();
         } catch (e) {
           status.textContent = 'Could not read AccuLynx (' + (e && e.message ? e.message : e) + '). Open https://my.acculynx.com/calendar in another tab and try again, or use the search option below.';
