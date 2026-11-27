@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.9.3
+// @version      1.9.4
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe and right of "for Amos Exteriors" in the title of AccuLynx's Create New Lead page. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -474,7 +474,7 @@
       return { start: h * 60 + mm, end };
     }
 
-    async function find(address, slotPick, log) {
+    async function find(address, slotPick, log, custP) {
       tabList = null;
       const today = new Date(); today.setHours(12, 0, 0, 0);
       const days = [];
@@ -532,9 +532,16 @@
 
       log('Finding the address...');
       const q = /\bIN\b|Indiana|\b4[67]\d{3}\b/.test(address) ? address : `${address}, ${FC.STATE}`;
-      let cust = await geocode(q);
+      // the form's own map lookup (Census geocoder) is the most reliable: use it first
+      let cust = null;
+      try { const g = custP ? await custP : null; if (g && isFinite(g.lat) && isFinite(g.lon)) cust = { lat: +g.lat, lon: +g.lon, label: g.matched || address }; } catch (e) { /* fall back below */ }
+      if (!cust) {
+        cust = await geocode(q);
+        if (!cust) cust = await geocode(`${address.replace(/^\s*\d+[A-Za-z]?\s+/, '')}${/\bIN\b|Indiana/i.test(address) ? '' : ', ' + FC.STATE}`);                 // without the house number
+        if (!cust) { const parts = address.split(',').map(x => x.trim()).filter(Boolean); if (parts.length > 1) cust = await geocode(`${parts[parts.length - 1].replace(/\b4[67]\d{3}\b/, '').trim() || parts[parts.length - 2]}, ${FC.STATE}`); }   // just the town
+      }
       const zipTyped = (address.match(/\b(4[67]\d{3})\b/) || [])[1];
-      if (cust && zipTyped && !String(cust.label).includes(zipTyped)) {
+      if (cust && zipTyped && !custP && !String(cust.label).includes(zipTyped)) {
         GM_setValue('fit:geo:' + q.toLowerCase(), null);
         cust = await geocode(q) || null;
         if (!cust || !String(cust.label).includes(zipTyped)) cust = await geocode(`${zipTyped}, ${FC.STATE}`) || cust;
@@ -754,14 +761,14 @@
       fitOut.appendChild(el('div', `margin-top:8px;color:${MUTED};font-size:11px`, 'Ranked by the drive there, the drive to the next stop or home, and nearby Lead Pool leads that can be paired. Full rows and drives over 70 miles are left out.'));
     }
     let boardSeq = 0;
-    function runBoard(address) {
+    function runBoard(address, geoPromise) {
       const my = ++boardSeq;
       box.style.display = 'block'; placeBox(); place();
       slotsOut.textContent = ''; slotsOut.appendChild(el('div', `color:${MUTED};font-size:12px`, 'Loading the open slots…'));
       fitOut.textContent = ''; fitStatus.style.color = MUTED; fitStatus.textContent = 'Starting…';
       slotsHtml().then(h => { if (my !== boardSeq) return; slotsOut.innerHTML = h; })
         .catch(e => { if (my !== boardSeq) return; slotsOut.textContent = ''; slotsOut.appendChild(el('div', `color:${RED};font-size:12px`, 'Slots: ' + e.message)); });
-      FIT.find(address, 'any', m => { if (my === boardSeq) fitStatus.textContent = m; })
+      FIT.find(address, 'any', m => { if (my === boardSeq) fitStatus.textContent = m; }, geoPromise)
         .then(res => { if (my !== boardSeq) return; fitStatus.textContent = `For: ${address}  -  found ${res.cust.label.split(',').slice(0, 3).join(',')}  -  ${res.considered} open slots compared`; renderFit(res); })
         .catch(e => { if (my !== boardSeq) return; fitStatus.style.color = RED; fitStatus.textContent = 'Lead Fit Finder: ' + e.message; });
     }
@@ -944,8 +951,9 @@
       const dupLine = line('AccuLynx: searching name, phone, address, email…');
       checkOut.appendChild(ooaLine);
       const result = { key: checkKey(f), geo: null, area: null, dup: null };
-      runBoard(f.address);                       // Confirmable Lead Slots + Lead Fit Finder, in the box to the left
-      const geoP = geocode(f.address).then(g => {
+      const geoP0 = geocode(f.address);
+      runBoard(f.address, geoP0.catch(() => null));      // Confirmable Lead Slots + Lead Fit Finder, in the box to the left (uses the same map lookup)
+      const geoP = geoP0.then(g => {
         result.geo = g;
         geoLine.textContent = 'Map: ' + g.matched + (g.exact ? '' : '  (approximate - check the house number)');
         if (openTabs) {
