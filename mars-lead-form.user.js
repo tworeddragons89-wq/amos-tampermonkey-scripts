@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.9.2
+// @version      1.9.3
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe and right of "for Amos Exteriors" in the title of AccuLynx's Create New Lead page. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
@@ -699,7 +699,7 @@
       const prevVis = p.style.visibility; p.style.visibility = 'hidden';                 // read it without flashing it on screen
       try {
         await sleep(500);
-        const ok = await waitFor(() => { const t = p.innerText || ''; return t.length > 40 && !/Loading/i.test(t); }, 40000, 400);
+        const ok = await waitFor(() => { const t = p.textContent || ''; return t.length > 40 && !/Loading/i.test(t); }, 40000, 400);
         if (!ok) throw new Error('the CONF panel did not finish loading');
         const copy = p.cloneNode(true);
         copy.style.cssText = 'display:block;border:0;box-shadow:none;max-height:none;width:auto';
