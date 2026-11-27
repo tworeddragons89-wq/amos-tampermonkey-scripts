@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.9.1
+// @version      1.9.2
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
-// @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe and next to CONF on AccuLynx's Create New Lead page. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
+// @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe and right of "for Amos Exteriors" in the title of AccuLynx's Create New Lead page. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
 // @author       Andrew Thomas (Mars 2) with Claude
 // @match        https://web.groupme.com/*
 // @match        https://app.groupme.com/*
@@ -630,13 +630,14 @@
     const dock = () => {
       const conf = findConf();
       if (onAccuLynx) {
-        if (conf && shown(conf)) {
-          if (btn.previousElementSibling !== conf) {
-            btn.style.cssText = `position:static;display:inline-block;vertical-align:baseline;margin:0 0 6px 6px;background:${GREEN};color:#fff;border:1px solid #fff;box-shadow:0 0 0 1px ${GREEN};border-radius:4px;padding:4px 6px;font:700 11px/1 Arial,sans-serif;cursor:pointer`;
-            conf.insertAdjacentElement('afterend', btn);
+        const hd = document.querySelector('h1.ax-page-header__heading .location-text');      // "for Amos Exteriors" in the page title
+        if (hd && shown(hd)) {
+          if (btn.previousElementSibling !== hd) {
+            btn.style.cssText = `position:static;display:inline-block;vertical-align:middle;margin:0 0 0 18px;background:${GREEN};color:#fff;border:0;border-radius:8px;padding:9px 20px;font:700 15px/1 Arial,sans-serif;letter-spacing:.04em;box-shadow:0 1px 4px rgba(0,0,0,.25);cursor:pointer`;
+            hd.insertAdjacentElement('afterend', btn);
           }
-        } else if (btn.parentElement !== document.body) {            // no CONF on this page: a small button in the lower left
-          btn.style.cssText = `position:fixed;left:170px;bottom:22px;z-index:2147483000;background:${GREEN};color:#fff;border:0;border-radius:12px;padding:5px 12px;font:700 12px Arial,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.25);cursor:pointer`;
+        } else if (btn.parentElement !== document.body) {            // title not found: a button in the lower left
+          btn.style.cssText = `position:fixed;left:170px;bottom:22px;z-index:2147483000;background:${GREEN};color:#fff;border:0;border-radius:8px;padding:9px 20px;font:700 15px Arial,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.25);cursor:pointer`;
           document.body.appendChild(btn);
         }
       } else if (conf && shown(conf)) {
