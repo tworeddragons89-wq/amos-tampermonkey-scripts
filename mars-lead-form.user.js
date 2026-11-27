@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Mars Lead Form (GroupMe → AccuLynx + Lead Table)
 // @namespace    amos-exteriors
-// @version      1.8.0
+// @version      1.9.1
 // @updateURL    https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
 // @downloadURL  https://raw.githubusercontent.com/tworeddragons89-wq/amos-tampermonkey-scripts/main/mars-lead-form.user.js
-// @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
+// @description  In-house lead form for the Mars team. A green "+ LEAD" button sits next to CONF in GroupMe and next to CONF on AccuLynx's Create New Lead page. Check for Duplicate searches AccuLynx, opens Street View and the Predictive Sales AI storm map, and checks the Amos Service Area. Complete enters the lead in AccuLynx (or revives the old lead) and puts it in the Lead Table's Lead Pool.
 // @author       Andrew Thomas (Mars 2) with Claude
 // @match        https://web.groupme.com/*
 // @match        https://app.groupme.com/*
@@ -23,6 +23,7 @@
 // @connect      www.google.com
 // @connect      geocoding.geo.census.gov
 // @connect      nominatim.openstreetmap.org
+// @connect      router.project-osrm.org
 // @connect      maps.googleapis.com
 // @connect      streetviewpixels-pa.googleapis.com
 // @connect      googleusercontent.com
@@ -340,9 +341,258 @@
   }
 
   /* ======================================================================================
+     LEAD FIT FINDER (same logic as the Lead Fit Finder script): best open slots for an address.
+     Reads the Lead Table, measures the drives, and ranks the open slots for the next 4 days.
+     ====================================================================================== */
+  const FIT = (function () {
+    const FC = {
+      REP_COLS: 'CDEFGHIJKLMNOPQRSTUVW'.split(''),
+      SLOTS: ['Morning', 'Afternoon', 'Evening'],
+      WINDOWS: [[600, 705], [720, 915], [930, 1110]],   // lead start window per slot row (minutes after midnight)
+      LEAD_MIN: 120, STATE: 'IN', TOP: 5, MAX_MILES: 70, LOCAL_MIN: 10, LOCAL_MI: 4, CLUSTER_MIN: 20, FAR_MILES: 45, MAX_ROW: 100,
+    };
+    const ssid = CONFIG.LEAD_TABLE_ID;
+    const colLetter = (i) => { let s = ''; i += 1; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
+    const decode = (s) => String(s || '').replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, '').replace(/&nbsp;|&#160;/g, ' ')
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+
+    function parseSheet(html) {
+      const vis = [];
+      const headEnd = html.indexOf('</thead>');
+      (headEnd > 0 ? html.slice(0, headEnd) : '').replace(/<th\b[^>]*id="[^"]*C(\d+)"[^>]*>/gi, (m, n) => { vis.push(+n); return m; });
+      const letterAt = (pos) => colLetter(vis[pos] !== undefined ? vis[pos] : pos);
+      const cells = {}; const occ = {};
+      for (const tr of html.split(/<tr\b/i).slice(1)) {
+        const th = tr.match(/<th\b[^>]*>([\s\S]*?)<\/th>/i);
+        if (!th) continue;
+        const rn = parseInt(decode(th[1]).trim(), 10);
+        if (!rn || rn > FC.MAX_ROW) continue;
+        let pos = 0; const re = /<td\b([^>]*)>([\s\S]*?)<\/td>/gi; let t;
+        while ((t = re.exec(tr))) {
+          if (/freezebar/i.test(t[1])) continue;
+          while (occ[`${rn}:${pos}`]) pos += 1;
+          const cs = +((t[1].match(/colspan="?(\d+)/i) || [])[1] || 1), rs = +((t[1].match(/rowspan="?(\d+)/i) || [])[1] || 1);
+          for (let r = 0; r < rs; r += 1) for (let c = 0; c < cs; c += 1) occ[`${rn + r}:${pos + c}`] = 1;
+          cells[`${letterAt(pos)}${rn}`] = clean(decode(t[2]));
+          const job = (t[2].match(/jobs\/([0-9a-f]{8}-[0-9a-f-]{27})/i) || [])[1];
+          if (job) cells[`#${letterAt(pos)}${rn}`] = job.toLowerCase();
+          pos += cs;
+        }
+      }
+      return cells;
+    }
+    async function getText(url) {
+      const r = await gm({ method: 'GET', url, headers: { 'Cache-Control': 'no-cache' } });
+      if (r.status && r.status >= 400) throw new Error(`Lead Table answered ${r.status}. Make sure you are signed in to Google in this Chrome.`);
+      return r.responseText || '';
+    }
+    let tabList = null;
+    async function gidFor(name) {
+      if (!tabList) {
+        const h = await getText(`https://docs.google.com/spreadsheets/d/${ssid}/htmlview?_=${Date.now()}`);
+        tabList = [...h.matchAll(/items\.push\(\{name: "([^"]+)"[^}]*?gid: "?(\d+)/g)].map((m) => ({ name: m[1], gid: m[2] }));
+        if (!tabList.length) throw new Error('Could not open the Lead Table. Make sure you are signed in to Google in this Chrome.');
+      }
+      const t = tabList.find((x) => x.name.includes(name));
+      return t ? t.gid : null;
+    }
+    async function readTab(gid) {
+      const html = await getText(`https://docs.google.com/spreadsheets/d/${ssid}/htmlview/sheet?headers=true&gid=${gid}&_=${Date.now()}`);
+      if (!/<table/i.test(html)) throw new Error('Could not read the Lead Table. Make sure you are signed in to Google in this Chrome.');
+      return parseSheet(html);
+    }
+    function tabNameFor(d) {
+      const mon = new Date(d.getFullYear(), d.getMonth(), d.getDate() - ((d.getDay() + 6) % 7));
+      const sun = new Date(mon.getFullYear(), mon.getMonth(), mon.getDate() + 6);
+      const f = (x) => `${x.getMonth() + 1}.${x.getDate()}.${String(x.getFullYear()).slice(-2)}`;
+      return { mon, name: `${f(mon)}-${f(sun)}` };
+    }
+    function findBlocks(cells) {
+      const blocks = [];
+      for (let r = 3; r <= FC.MAX_ROW; r += 1) {
+        const n = FC.REP_COLS.filter((c) => /^\*?\s*[A-Z][a-z]+\s+[A-Z][A-Za-z'-]+/.test(cells[`${c}${r}`] || '')).length;
+        if (n >= 15) { blocks.push({ names: r, slots: [r + 1, r + 2, r + 3], pool: [r - 5, r - 4, r - 3] }); r += 6; }
+      }
+      return blocks.slice(0, 7);
+    }
+    function repsOf(cells, namesRow) {
+      return FC.REP_COLS.map((c) => {
+        const raw = cells[`${c}${namesRow}`] || '';
+        const manager = raw.includes('*');
+        const words = raw.replace(/\*/g, '').trim().split(' ');
+        return { col: c, name: words.slice(0, 2).join(' '), home: words.slice(2).join(' '), manager };
+      }).filter((r) => r.name);
+    }
+    function placeFromCell(text) {
+      const src = clean(String(text || '').replace(/[*!()]/g, ' '));
+      if (/\b(MGT|MGMT|MTG|MEETING|OFF|1:1|SALES|UNAVAILABLE|AWAY|KIDS|SELF\s*GEN)\b/i.test(src)) return '';
+      const t = src.replace(/^(\d{1,4}(?:-\d{1,4})?)(?:\s*[<>]\s*\d{3,4})?\s+/, '');
+      if (t === src) return '';
+      const zip = t.match(/^(4[67]\d{3})\b/); if (zip) return zip[1];
+      const words = t.split(' ');
+      const stop = /^(roof|siding|sid|gutters?|gut|windows?|win|doors?|front|soffit|sof|fascia|hardie|insulation|chimney|skylights?|masonry|su|adj|beback|walk|problem|contract|save|self|gen|rh|so|pc|\d.*)$/i;
+      const out = [];
+      for (const w of words) { if (stop.test(w) || /[\/,]/.test(w)) break; out.push(w); if (out.length === 2) break; }
+      return out.join(' ');
+    }
+
+    async function geocode(q) {
+      const key = 'fit:geo:' + q.toLowerCase();
+      const hit = GM_getValue(key, null);
+      if (hit) return hit;
+      const last = GM_getValue('fit:geo:last', 0); const wait = 1100 - (Date.now() - last);
+      if (wait > 0) await sleep(wait);                          // OpenStreetMap allows 1 lookup per second
+      GM_setValue('fit:geo:last', Date.now());
+      const r = await gm({ method: 'GET', url: `https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=${encodeURIComponent(q)}` });
+      const arr = JSON.parse(r.responseText || '[]');
+      if (!arr.length) return null;
+      const p = { lat: +arr[0].lat, lon: +arr[0].lon, label: arr[0].display_name };
+      GM_setValue(key, p);
+      return p;
+    }
+    const TOWN_FIX = { 'mccrdsvlle': 'McCordsville', 'mrtinsville': 'Martinsville', 'princes lakes': 'Princes Lakes', 'floyd knobs': 'Floyds Knobs' };
+    const fixTown = (p) => TOWN_FIX[clean(p).toLowerCase()] || p;
+    const withState = (place) => (/\b(IN|Indiana)\b/i.test(place) ? place : `${place}, ${FC.STATE}`);
+    const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const MI = 1609.34;
+    async function osrmFrom(origin, pts) {
+      const coords = [origin, ...pts].map((p) => `${p.lon.toFixed(5)},${p.lat.toFixed(5)}`).join(';');
+      const r = await gm({ method: 'GET', url: `https://router.project-osrm.org/table/v1/driving/${coords}?sources=0&annotations=duration,distance` });
+      const j = JSON.parse(r.responseText || '{}');
+      if (!j.durations) throw new Error('Drive-time service did not answer. Try again in a minute.');
+      return pts.map((p, k) => ({ min: j.durations[0][k + 1] == null ? null : Math.round(j.durations[0][k + 1] / 60), mi: j.distances[0][k + 1] == null ? null : Math.round(j.distances[0][k + 1] / MI) }));
+    }
+    function timeFromCell(text) {
+      const m = clean(text).match(/^(\d{1,4})(?:-(\d{1,4}))?(?:\s*[<>]\s*(\d{3,4}))?\s/);
+      if (!m) return null;
+      const tok = m[3] || m[1];
+      let h, mm; if (tok.length <= 2) { h = +tok; mm = 0; } else { h = +tok.slice(0, -2); mm = +tok.slice(-2); }
+      if (h < 1 || h > 12 || mm > 59) return null;
+      if (h <= 7) h += 12;
+      let end = null;
+      if (m[2] && !m[3]) { const e = m[2]; let eh, em; if (e.length <= 2) { eh = +e; em = 0; } else { eh = +e.slice(0, -2); em = +e.slice(-2); } if (eh <= 8) eh += 12; end = eh * 60 + em; }
+      return { start: h * 60 + mm, end };
+    }
+
+    async function find(address, slotPick, log) {
+      tabList = null;
+      const today = new Date(); today.setHours(12, 0, 0, 0);
+      const days = [];
+      for (let k = 0; k < 4; k += 1) { const d = new Date(today); d.setDate(d.getDate() + k); if (d.getDay() !== 0) days.push(d); }
+      const tabCells = {};
+      const candidates = [];
+      for (const d of days) {
+        const { mon, name } = tabNameFor(d);
+        if (!tabCells[name]) {
+          log(`Reading ${name}...`);
+          const gid = await gidFor(name);
+          if (!gid) { log(`No tab ${name} yet - skipped.`); tabCells[name] = null; continue; }
+          tabCells[name] = await readTab(gid);
+        }
+        const cells = tabCells[name];
+        if (!cells) continue;
+        const idx = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - mon) / 86400000);
+        const block = findBlocks(cells)[idx];
+        if (!block) continue;
+        const reps = repsOf(cells, block.names);
+        const places = reps.map((r) => block.slots.map((row) => placeFromCell(cells[`${r.col}${row}`])));
+        const times = reps.map((r) => block.slots.map((row) => (placeFromCell(cells[`${r.col}${row}`]) ? timeFromCell(cells[`${r.col}${row}`]) : null)));
+        const dayPool = [];
+        {
+          const pj = new Set(); block.slots.concat([block.slots[2] + 1]).forEach((rr) => FC.REP_COLS.forEach((c) => { const j = cells[`#${c}${rr}`]; if (j) pj.add(j); }));
+          block.pool.forEach((pr, pi) => FC.REP_COLS.forEach((c) => {
+            const t = cells[`${c}${pr}`] || ''; const j = cells[`#${c}${pr}`];
+            if (!t || /^(DO NOT FILL|SALES MTG|NO LEADS|CANCELS?|PGT.*)$/i.test(t) || (j && pj.has(j))) return;
+            const pl = placeFromCell(t); if (pl) dayPool.push({ place: fixTown(pl), slotIdx: pi, text: t });
+          }));
+        }
+        block.slots.forEach((row, i) => {
+          const placedJobs = new Set(); block.slots.concat([block.slots[2] + 1]).forEach((rr) => FC.REP_COLS.forEach((c) => { const j = cells[`#${c}${rr}`]; if (j) placedJobs.add(j); }));
+          const waiting = FC.REP_COLS.filter((c) => {
+            const t = cells[`${c}${block.pool[i]}`] || '';
+            if (!t || /^(DO NOT FILL|SALES MTG|NO LEADS|CANCELS?|PGT.*)$/i.test(t)) return false;
+            const j = cells[`#${c}${block.pool[i]}`];
+            return !(j && placedJobs.has(j));
+          }).length;
+          const need = parseInt(cells[`B${row}`], 10) - waiting;
+          if (!(need > 0)) return;
+          if (slotPick !== 'any' && FC.SLOTS[i] !== slotPick) return;
+          reps.forEach((r, ri) => {
+            if (cells[`${r.col}${row}`]) return;
+            let from = r.home, fromWhy = 'home', prevEnd = null;
+            for (let j = i - 1; j >= 0; j -= 1) if (places[ri][j]) { from = places[ri][j]; fromWhy = `${FC.SLOTS[j].toLowerCase()} appt`; const t = times[ri][j]; if (t) prevEnd = t.end || t.start + FC.LEAD_MIN; break; }
+            let next = r.home, nextWhy = 'home', nextStart = null;
+            for (let j = i + 1; j < 3; j += 1) if (places[ri][j]) { next = places[ri][j]; nextWhy = `${FC.SLOTS[j].toLowerCase()} appt`; const t = times[ri][j]; if (t) nextStart = t.start; break; }
+            const sameDay = places[ri].filter(Boolean);
+            candidates.push({ d, label: `${DOW[d.getDay()]} ${d.getMonth() + 1}/${d.getDate()}`, slot: FC.SLOTS[i], slotIdx: i, rep: r, from: fixTown(from), fromWhy, next: fixTown(next), nextWhy, need, prevEnd, nextStart, sameDay: sameDay.map(fixTown), dayPool });
+          });
+        });
+      }
+      if (!candidates.length) throw new Error('No open slot with leads needed in the next 4 days.');
+
+      log('Finding the address...');
+      const q = /\bIN\b|Indiana|\b4[67]\d{3}\b/.test(address) ? address : `${address}, ${FC.STATE}`;
+      let cust = await geocode(q);
+      const zipTyped = (address.match(/\b(4[67]\d{3})\b/) || [])[1];
+      if (cust && zipTyped && !String(cust.label).includes(zipTyped)) {
+        GM_setValue('fit:geo:' + q.toLowerCase(), null);
+        cust = await geocode(q) || null;
+        if (!cust || !String(cust.label).includes(zipTyped)) cust = await geocode(`${zipTyped}, ${FC.STATE}`) || cust;
+      }
+      if (!cust) throw new Error(`Address not found: "${address}". Try street + city, or the zip.`);
+
+      log('Measuring drives...');
+      const names = [...new Set(candidates.flatMap((c) => [c.from, c.next, ...c.sameDay, ...c.dayPool.map((p) => p.place)]))].filter(Boolean);
+      const pts = {}; let done = 0;
+      for (const nm of names) {
+        try { pts[nm] = await geocode(withState(nm)); } catch (e) { await sleep(2500); try { pts[nm] = await geocode(withState(nm)); } catch (e2) { pts[nm] = null; } }
+        done += 1; log(`Measuring drives... (${done}/${names.length} places)`);
+      }
+      const known = names.filter((nm) => pts[nm]);
+      const custKey = `${cust.lat.toFixed(3)},${cust.lon.toFixed(3)}`;
+      const legs = {}; const missing = [];
+      known.forEach((nm) => { const hit = GM_getValue(`fit:leg:${custKey}|${nm.toLowerCase()}`, null); if (hit) legs[nm] = hit; else missing.push(nm); });
+      for (let k = 0; k < missing.length; k += 90) {
+        const part = missing.slice(k, k + 90);
+        (await osrmFrom(cust, part.map((nm) => pts[nm]))).forEach((v, n) => { legs[part[n]] = v; if (v.min != null) GM_setValue(`fit:leg:${custKey}|${part[n].toLowerCase()}`, v); });
+      }
+      Object.values(legs).forEach((v) => { if (v && v.min != null && v.min < FC.LOCAL_MIN) { v.local = true; v.min = FC.LOCAL_MIN; v.mi = Math.max(v.mi || 0, FC.LOCAL_MI); } });
+
+      const scored = [];
+      candidates.forEach((c) => {
+        const inn = legs[c.from], out = legs[c.next];
+        if (!inn || inn.min == null) return;
+        if (inn.mi > FC.MAX_MILES) return;
+        const back = out && out.min != null ? out.min : inn.min;
+        const nearest = Math.min(...[c.from, c.next, ...c.sameDay].map((nm) => (legs[nm] && legs[nm].min != null ? legs[nm].min : 999)));
+        const near = c.dayPool.filter((p) => p.slotIdx !== c.slotIdx).map((p) => ({ p, m: legs[p.place] && legs[p.place].min != null ? legs[p.place].min : 999 })).filter((x) => x.m <= FC.CLUSTER_MIN).sort((a, b) => a.m - b.m);
+        const pairable = near.find((x) => Math.abs(x.p.slotIdx - c.slotIdx) === 1) || null;
+        const score = inn.min + 0.5 * back - (c.sameDay.length && nearest <= 25 ? 10 : 0) - (pairable ? 12 : near.length ? 5 : 0) + (c.rep.manager ? 15 : 0);
+        const [w0, w1] = FC.WINDOWS[c.slotIdx];
+        let earliest = w0;
+        const now = new Date();
+        if (c.d.toDateString() === now.toDateString()) earliest = Math.max(earliest, now.getHours() * 60 + now.getMinutes() + 60);
+        if (c.prevEnd != null) earliest = Math.max(earliest, c.prevEnd + inn.min);
+        earliest = Math.ceil(earliest / 15) * 15;
+        let latest = w1;
+        if (c.nextStart != null) latest = Math.min(latest, Math.floor((c.nextStart - FC.LEAD_MIN - back) / 15) * 15);
+        if (earliest > latest) return;
+        scored.push(Object.assign(c, { local: !!inn.local, min: inn.min, mi: inn.mi, back, nearest, score, startAt: earliest, latestAt: latest, pair: pairable || null }));
+      });
+      if (!scored.length) throw new Error('Every open rep is more than 70 miles away in the next 4 days.');
+      scored.sort((a, b) => a.score - b.score);
+      const top = []; const usedSlot = new Set();
+      for (const c of scored) { const k = `${c.label}|${c.slot}|${c.startAt}`; if (usedSlot.has(k)) continue; usedSlot.add(k); top.push(c); if (top.length === FC.TOP) break; }
+      const far = top[0].mi >= FC.FAR_MILES;
+      return { cust, top, far, considered: scored.length };
+    }
+    return { find, FC };
+  })();
+
+  /* ======================================================================================
      GROUPME: the form
      ====================================================================================== */
-  if (/groupme\.com$/.test(location.host)) {
+  function mountLeadForm(onAccuLynx) {
     const NAVY = '#1f3a5f', GREEN = '#1b7f3a', RED = '#b42318', LINE = '#d9dee6', MUTED = '#5f6b7a';
     const el = (tag, style, text, attrs) => { const e = document.createElement(tag); if (style) e.style.cssText = style; if (text != null) e.textContent = text; Object.entries(attrs || {}).forEach(([k, v]) => e.setAttribute(k, v)); return e; };
     const inputCss = `width:100%;box-sizing:border-box;border:1px solid ${LINE};border-radius:6px;padding:6px 8px;font:13px Arial,sans-serif;color:#1d2430;background:#fff`;
@@ -374,10 +624,22 @@
     document.body.appendChild(panel); document.body.appendChild(btn);
     ['keydown', 'keypress', 'keyup', 'paste'].forEach(ev => panel.addEventListener(ev, e => e.stopPropagation()));
 
-    // sits right next to the CONF button (Lead Slots); top-right corner when CONF is not on the page
+    // sits right next to the CONF button: GroupMe = the Lead Slots CONF (top bar), AccuLynx = the CONF above Notes on Create New Lead
+    const shown = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };      // (a fixed-position button has no offsetParent, so "visible()" cannot be used)
+    const findConf = () => [...document.querySelectorAll('button')].find(b => b !== btn && b.textContent.trim() === 'CONF' && (onAccuLynx || /confirmable/i.test(b.title || '')));
     const dock = () => {
-      const conf = [...document.querySelectorAll('button')].find(b => b !== btn && b.textContent.trim() === 'CONF' && /confirmable/i.test(b.title || ''));
-      if (conf && visible(conf)) {
+      const conf = findConf();
+      if (onAccuLynx) {
+        if (conf && shown(conf)) {
+          if (btn.previousElementSibling !== conf) {
+            btn.style.cssText = `position:static;display:inline-block;vertical-align:baseline;margin:0 0 6px 6px;background:${GREEN};color:#fff;border:1px solid #fff;box-shadow:0 0 0 1px ${GREEN};border-radius:4px;padding:4px 6px;font:700 11px/1 Arial,sans-serif;cursor:pointer`;
+            conf.insertAdjacentElement('afterend', btn);
+          }
+        } else if (btn.parentElement !== document.body) {            // no CONF on this page: a small button in the lower left
+          btn.style.cssText = `position:fixed;left:170px;bottom:22px;z-index:2147483000;background:${GREEN};color:#fff;border:0;border-radius:12px;padding:5px 12px;font:700 12px Arial,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.25);cursor:pointer`;
+          document.body.appendChild(btn);
+        }
+      } else if (conf && shown(conf)) {
         const r = conf.getBoundingClientRect();
         btn.style.right = 'auto'; btn.style.left = Math.min(innerWidth - btn.offsetWidth - 8, r.right + 6) + 'px';
         btn.style.top = (r.top + r.height / 2 - btn.offsetHeight / 2) + 'px';
@@ -387,11 +649,121 @@
     const place = () => {
       if (panel.style.display === 'none') return;
       const r = btn.getBoundingClientRect(), M = 8, pw = Math.min(460, innerWidth - 2 * M);
-      panel.style.left = Math.max(M, Math.min(r.right - pw, innerWidth - pw - M)) + 'px';
+      // opens under the button, its left edge on the button, so there is room on the LEFT for the slots / fit box
+      panel.style.left = Math.max(M, Math.min(r.left, innerWidth - pw - M)) + 'px';
       panel.style.top = Math.min(r.bottom + M, innerHeight - 200) + 'px';
       panel.style.maxHeight = (innerHeight - parseFloat(panel.style.top) - M) + 'px';
+      placeBox();
     };
     setInterval(dock, 800); addEventListener('resize', dock); setTimeout(dock, 300);
+
+    /* ---------- the box to the LEFT of the form: Confirmable Lead Slots + Lead Fit Finder (filled by CHECK FOR DUPLICATE) ---------- */
+    const box = el('div', `position:fixed;z-index:2147483001;width:480px;max-width:calc(100vw - 16px);background:#fff;border:1px solid ${LINE};border-radius:10px;box-shadow:0 8px 28px rgba(16,24,40,.25);font:13px Arial,sans-serif;color:#1d2430;display:none;overflow:auto`);
+    const boxHead = el('div', `position:sticky;top:0;z-index:1;padding:10px 14px;background:${NAVY};color:#fff;display:flex;align-items:center;border-radius:10px 10px 0 0`);
+    boxHead.appendChild(el('div', 'flex:1;font-weight:700;font-size:14px', 'Availability'));
+    const boxX = el('button', 'border:0;background:none;color:#fff;font-size:20px;cursor:pointer;line-height:1', '×'); boxX.onclick = () => { box.style.display = 'none'; };
+    boxHead.appendChild(boxX); box.appendChild(boxHead);
+    const slotsHead = el('div', `padding:8px 14px 0;font-size:11px;font-weight:700;color:${MUTED};text-transform:uppercase;letter-spacing:.04em`, 'Confirmable Lead Slots');
+    const slotsOut = el('div', 'padding:4px 14px 10px');
+    const fitHead = el('div', `padding:8px 14px 0;border-top:1px solid ${LINE};font-size:11px;font-weight:700;color:${MUTED};text-transform:uppercase;letter-spacing:.04em`, 'Lead Fit Finder');
+    const fitStatus = el('div', `padding:2px 14px;color:${MUTED};font-size:12px`);
+    const fitOut = el('div', 'padding:0 14px 12px');
+    [slotsHead, slotsOut, fitHead, fitStatus, fitOut].forEach(x => box.appendChild(x));
+    document.body.appendChild(box);
+    ['keydown', 'keypress', 'keyup', 'paste'].forEach(ev => box.addEventListener(ev, e => e.stopPropagation()));
+    function placeBox() {
+      if (box.style.display === 'none' || panel.style.display === 'none') return;
+      const M = 8, pl = parseFloat(panel.style.left) || M;
+      const bw = Math.max(280, Math.min(480, pl - M - M));
+      box.style.width = bw + 'px';
+      box.style.left = Math.max(M, pl - M - bw) + 'px';
+      box.style.top = panel.style.top;
+      box.style.maxHeight = panel.style.maxHeight;
+    }
+
+    // --- Confirmable Lead Slots: copied from the CONF panel (GroupMe). On AccuLynx the GroupMe tab is asked to do it.
+    const findSlotsPanel = () => {
+      const t = [...document.querySelectorAll('div')].find(d => d.children.length === 0 && d.textContent.trim() === 'Confirmable Lead Slots');
+      for (let p = t; p && p !== document.body; p = p.parentElement) if (getComputedStyle(p).position === 'fixed') return p;
+      return null;
+    };
+    async function readSlotsHere() {
+      const conf = findConf();
+      if (!conf) throw new Error('no CONF button on this page');
+      let p = findSlotsPanel();
+      const wasOpen = !!p && p.style.display !== 'none';
+      if (wasOpen) { const rb = [...p.querySelectorAll('button')].find(b => b.textContent.trim() === 'Refresh'); if (rb) rb.click(); }
+      else { conf.click(); p = await waitFor(findSlotsPanel, 5000); }
+      if (!p) throw new Error('the CONF panel did not open');
+      const prevVis = p.style.visibility; p.style.visibility = 'hidden';                 // read it without flashing it on screen
+      try {
+        await sleep(500);
+        const ok = await waitFor(() => { const t = p.innerText || ''; return t.length > 40 && !/Loading/i.test(t); }, 40000, 400);
+        if (!ok) throw new Error('the CONF panel did not finish loading');
+        const copy = p.cloneNode(true);
+        copy.style.cssText = 'display:block;border:0;box-shadow:none;max-height:none;width:auto';
+        if (copy.firstElementChild) copy.removeChild(copy.firstElementChild);               // its own blue header
+        copy.querySelectorAll('button').forEach(b => { b.style.pointerEvents = 'none'; b.style.cursor = 'default'; });
+        return copy.outerHTML;
+      } finally {
+        p.style.visibility = prevVis;
+        if (!wasOpen) { const x = [...p.querySelectorAll('button')].find(b => b.textContent.trim() === '×'); if (x) x.click(); else p.style.display = 'none'; }
+      }
+    }
+    if (!onAccuLynx) {
+      // an AccuLynx tab asks; the GroupMe tab with the CONF button answers
+      GM_addValueChangeListener('mlf_slots_req', async (n, o, req) => {
+        if (!req || !req.id || Date.now() - req.ts > 60000 || !findConf()) return;
+        try { GM_setValue('mlf_slots_res', { id: req.id, ok: true, html: await readSlotsHere() }); }
+        catch (e) { GM_setValue('mlf_slots_res', { id: req.id, ok: false, error: e.message }); }
+      });
+    }
+    async function slotsHtml() {
+      if (!onAccuLynx) return readSlotsHere().catch(e => { throw new Error(e.message === 'no CONF button on this page' ? 'The CONF (Confirmable Lead Slots) button is not on this page - install / enable the Lead Slots script.' : e.message); });
+      const id = Date.now() + '-' + Math.random().toString(36).slice(2);
+      GM_setValue('mlf_slots_req', { id, ts: Date.now() });
+      const res = await waitFor(() => { const v = GM_getValue('mlf_slots_res', null); return v && v.id === id ? v : null; }, 60000, 500);
+      if (!res) throw new Error('No answer - keep a GroupMe tab open (with the CONF button) and press CHECK FOR DUPLICATE again.');
+      if (!res.ok) throw new Error(res.error || 'could not read the slots');
+      return res.html;
+    }
+
+    // --- Lead Fit Finder results
+    function renderFit(res) {
+      fitOut.textContent = '';
+      const cellCss = `padding:7px 6px;border-bottom:1px solid ${LINE};vertical-align:top`;
+      if (res.far) fitOut.appendChild(el('div', 'margin:6px 0 10px;padding:8px 10px;background:#fff4e5;border:1px solid #f5c58a;border-radius:6px;color:#7a4a00;font-size:12px', `Distant lead (${res.top[0].mi} mi for the best fit). Book this rep's slot with another lead in the same area or on the way back.`));
+      const table = el('table', 'width:100%;border-collapse:collapse;font-size:12.5px');
+      const hr = el('tr');
+      ['#', 'Day / best time', 'Drive', 'From → then'].forEach(h => hr.appendChild(el('th', `text-align:left;padding:6px;color:${MUTED};font-weight:600;border-bottom:2px solid ${LINE};font-size:11px;text-transform:uppercase;letter-spacing:.04em`, h)));
+      table.appendChild(hr);
+      res.top.forEach((c, k) => {
+        const tr = el('tr', k === 0 ? 'background:#f2f7fc' : '');
+        tr.appendChild(el('td', `${cellCss};font-weight:700;color:${NAVY}`, String(k + 1)));
+        const ds = el('td', cellCss); ds.appendChild(el('div', 'font-weight:600', c.label)); ds.appendChild(el('div', `font-weight:700;color:${NAVY}`, clock(c.startAt)));
+        ds.appendChild(el('div', `color:${MUTED};font-size:11.5px`, `${c.slot}${c.latestAt > c.startAt ? ` · ok until ${clock(c.latestAt)}` : ''} · ${c.need} needed`)); tr.appendChild(ds);
+        const dc = el('td', cellCss); const col = c.min <= 30 ? GREEN : c.min <= 60 ? '#b26a00' : RED;
+        dc.appendChild(el('div', `font-weight:700;color:${col}`, c.local ? `~${c.min} min` : `${c.min} min`)); dc.appendChild(el('div', `color:${MUTED};font-size:11.5px`, c.local ? 'same area' : `${c.mi} mi`)); tr.appendChild(dc);
+        const fc = el('td', `${cellCss};color:${MUTED};font-size:11.5px`);
+        fc.appendChild(el('div', '', `${c.from} (${c.fromWhy})`)); fc.appendChild(el('div', '', `→ ${c.next} (${c.nextWhy}, ${c.back} min)`));
+        if (c.pair) fc.appendChild(el('div', `color:${GREEN};font-weight:600`, `Pair with pool lead ${c.pair.p.text.split(' ').slice(0, 3).join(' ')} (${FIT.FC.SLOTS[c.pair.p.slotIdx].toLowerCase()}, ${c.pair.m} min apart)`));
+        tr.appendChild(fc); table.appendChild(tr);
+      });
+      fitOut.appendChild(table);
+      fitOut.appendChild(el('div', `margin-top:8px;color:${MUTED};font-size:11px`, 'Ranked by the drive there, the drive to the next stop or home, and nearby Lead Pool leads that can be paired. Full rows and drives over 70 miles are left out.'));
+    }
+    let boardSeq = 0;
+    function runBoard(address) {
+      const my = ++boardSeq;
+      box.style.display = 'block'; placeBox(); place();
+      slotsOut.textContent = ''; slotsOut.appendChild(el('div', `color:${MUTED};font-size:12px`, 'Loading the open slots…'));
+      fitOut.textContent = ''; fitStatus.style.color = MUTED; fitStatus.textContent = 'Starting…';
+      slotsHtml().then(h => { if (my !== boardSeq) return; slotsOut.innerHTML = h; })
+        .catch(e => { if (my !== boardSeq) return; slotsOut.textContent = ''; slotsOut.appendChild(el('div', `color:${RED};font-size:12px`, 'Slots: ' + e.message)); });
+      FIT.find(address, 'any', m => { if (my === boardSeq) fitStatus.textContent = m; })
+        .then(res => { if (my !== boardSeq) return; fitStatus.textContent = `For: ${address}  -  found ${res.cust.label.split(',').slice(0, 3).join(',')}  -  ${res.considered} open slots compared`; renderFit(res); })
+        .catch(e => { if (my !== boardSeq) return; fitStatus.style.color = RED; fitStatus.textContent = 'Lead Fit Finder: ' + e.message; });
+    }
 
     /* ---------- form fields ---------- */
     const F = {};
@@ -497,6 +869,45 @@
     F.cts.onchange = () => { F.apptDate.disabled = F.apptTime.disabled = F.cts.checked; };
     select('assign', 'Who is the rep assigned to?', CONFIG.ASSIGN_OPTIONS, '- pick -');
 
+    // two small optional drop boxes: a picture dropped here is used instead of the automatic one
+    const PHOTO = { ov: '', ls: '' };
+    const photoRow = el('div', 'display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px');
+    const photoBoxes = {};
+    function photoBox(key, title) {
+      const b = el('div', `border:1px dashed ${MUTED};border-radius:6px;padding:4px 6px;min-height:34px;display:flex;align-items:center;gap:6px;font-size:11px;color:${MUTED};cursor:pointer;background:#fafbfc`, '', { title: 'Drag a picture here (or click to choose one). Optional.' });
+      const img = el('img', 'width:30px;height:30px;object-fit:cover;border-radius:4px;display:none');
+      const t = el('div', 'flex:1;line-height:1.2'); const tt = el('b', `color:#1d2430;display:block`, title); const hint = el('span', '', 'drop here (optional)'); t.appendChild(tt); t.appendChild(hint);
+      const x = el('span', `color:${RED};font-weight:700;display:none;padding:0 3px`, '×', { title: 'remove' });
+      const file = el('input', 'display:none', null, { type: 'file', accept: 'image/*' });
+      b.appendChild(img); b.appendChild(t); b.appendChild(x); b.appendChild(file);
+      const set = (data) => { PHOTO[key] = data || ''; img.style.display = data ? 'block' : 'none'; if (data) img.src = data; x.style.display = data ? 'inline' : 'none'; hint.textContent = data ? 'picture added' : 'drop here (optional)'; b.style.borderColor = data ? GREEN : MUTED; };
+      const shrink = (src) => new Promise((res, rej) => { const im = new Image(); im.onload = () => { const k = Math.min(1, 1600 / Math.max(im.width, im.height)); const c = document.createElement('canvas'); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k); c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); res(c.toDataURL('image/jpeg', 0.85)); }; im.onerror = () => rej(new Error('not a picture')); im.src = src; });
+      const fromFile = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('could not read the file')); r.readAsDataURL(f); });
+      const take = async (dt) => {
+        try {
+          let src = '';
+          const f = [...(dt.files || [])].find(x => /^image\//.test(x.type));
+          if (f) src = await fromFile(f);
+          else {                                                       // a picture dragged out of a web page / GroupMe: it arrives as a link
+            const url = (dt.getData('text/uri-list') || dt.getData('text/plain') || '').split('\n')[0].trim();
+            if (!/^https?:/i.test(url)) throw new Error('drop a picture file or a picture from a page');
+            src = await blobToDataUrl(await fetchBlob(url, 2));
+          }
+          set(await shrink(src)); status(title + ' added.');
+        } catch (e) { status(title + ': ' + e.message, true); }
+      };
+      b.addEventListener('dragover', e => { e.preventDefault(); b.style.background = '#eaf5ee'; });
+      b.addEventListener('dragleave', () => { b.style.background = '#fafbfc'; });
+      b.addEventListener('drop', e => { e.preventDefault(); b.style.background = '#fafbfc'; take(e.dataTransfer); });
+      b.addEventListener('click', e => { if (e.target === x) { set(''); return; } if (e.target !== file) file.click(); });
+      file.addEventListener('change', () => { if (file.files[0]) take({ files: file.files, getData: () => '' }); file.value = ''; });
+      photoBoxes[key] = { set };
+      photoRow.appendChild(b);
+    }
+    const blobToDataUrl = (blob) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('could not read the picture')); r.readAsDataURL(blob); });
+    photoBox('ov', 'Overview Photo'); photoBox('ls', 'Lead Sheet Photo');
+    body.appendChild(photoRow);
+
     const doneBtn = el('button', `width:100%;margin-top:6px;padding:12px;border:0;border-radius:8px;background:${GREEN};color:#fff;font:700 15px Arial,sans-serif;letter-spacing:.04em;cursor:pointer`, 'COMPLETE');
     body.appendChild(doneBtn);
     const statusEl = el('div', 'margin-top:8px;font-size:12px;min-height:16px');
@@ -532,6 +943,7 @@
       const dupLine = line('AccuLynx: searching name, phone, address, email…');
       checkOut.appendChild(ooaLine);
       const result = { key: checkKey(f), geo: null, area: null, dup: null };
+      runBoard(f.address);                       // Confirmable Lead Slots + Lead Fit Finder, in the box to the left
       const geoP = geocode(f.address).then(g => {
         result.geo = g;
         geoLine.textContent = 'Map: ' + g.matched + (g.exact ? '' : '  (approximate - check the house number)');
@@ -668,6 +1080,8 @@
       if (!L.trades.length) L.trades = ['Repairs'];
       if (chk.geo) { const ad = splitAddress(f.address); L.city = ad.city || chk.geo.city; L.zip = ad.zip || chk.geo.zip; }
       L.notesText = notesFor(L);
+      if (PHOTO.ov) L.ovData = PHOTO.ov;
+      if (PHOTO.ls) L.lsData = PHOTO.ls;
       if (curPrefill) {      // came from GroupMe's Enter Lead: carry the lead sheet photo + the rep's post, and remember who to tell "entered"
         L.imageUrl = curPrefill.imageUrl || ''; L.rawPost = curPrefill.raw || '';
         const pm = GM_getValue('mlf_prefill_map', {}); pm[L.id] = { id: curPrefill.id, chatId: curPrefill.chatId, name: `${L.first} ${L.last}` }; GM_setValue('mlf_prefill_map', pm);
@@ -678,7 +1092,7 @@
       // clear the form for the next lead
       ['first', 'last', 'phone', 'email', 'address', 'productOther', 'material', 'concerns', 'age', 'built', 'purchased', 'style', 'mrs', 'mr'].forEach(k => { F[k].value = ''; });
       F.notes.value = ''; F.leadSource.value = ''; F.workType.value = 'Retail'; F.apptDate.value = ''; F.apptTime.value = ''; F.assign.value = '';
-      F.cts.checked = false; F.cts.onchange(); F.products.forEach(c => { c.checked = false; });
+      F.cts.checked = false; F.cts.onchange(); F.products.forEach(c => { c.checked = false; }); photoBoxes.ov.set(''); photoBoxes.ls.set('');
       checkOut.textContent = ''; lastCheck = null;
       status(`${L.first} ${L.last} sent - ${plan.kind === 'revive' ? 'updating the existing job' : 'creating the lead'} in AccuLynx. You can type the next lead.`);
       dispatchTick();
@@ -755,7 +1169,7 @@
       ['first', 'last', 'phone', 'email', 'address', 'productOther', 'material', 'concerns', 'age', 'built', 'purchased', 'style', 'mrs', 'mr'].forEach(k => set(k, v[k]));
       F.notes.value = v.notes || ''; F.workType.value = v.workType || 'Retail'; F.assign.value = v.assign || '';
       F.products.forEach(c => { c.checked = (v.products || []).includes(c.value); });
-      F.cts.checked = !!v.cts; F.cts.onchange();
+      F.cts.checked = !!v.cts; F.cts.onchange(); photoBoxes.ov.set(''); photoBoxes.ls.set('');
       F.apptDate.value = v.cts ? '' : (v.apptDate || ''); F.apptTime.value = v.apptMin == null || v.cts ? '' : String(v.apptMin);
       if (v.leadSourceValue) F.leadSource.value = v.leadSourceValue;
       checkOut.textContent = ''; lastCheck = null; paintOoa();
@@ -811,10 +1225,10 @@
       curPrefill = null; setForm({}); status('Saved for later (listed under Other options).');
     };
 
-    btn.onclick = () => { if (panel.style.display === 'none') { panel.style.display = 'block'; place(); } else panel.style.display = 'none'; };
-    xBtn.onclick = () => { panel.style.display = 'none'; };
-    return;
+    btn.onclick = () => { if (panel.style.display === 'none') { panel.style.display = 'block'; place(); } else { panel.style.display = 'none'; box.style.display = 'none'; } };
+    xBtn.onclick = () => { panel.style.display = 'none'; box.style.display = 'none'; };
   }
+  if (/groupme\.com$/.test(location.host)) { mountLeadForm(false); return; }
 
   /* ======================================================================================
      GOOGLE MAPS (only for a tab this script opened):
@@ -879,6 +1293,11 @@
     return;
   }
 
+  function dataUrlToBlob(d) {
+    const m = String(d || '').match(/^data:([^;,]+)?(;base64)?,(.*)$/s); if (!m) throw new Error('bad picture');
+    const bin = atob(m[3]); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return new Blob([u8], { type: m[1] || 'image/jpeg' });
+  }
   function fetchBlob(url, tries = 2) {
     return new Promise((res, rej) => GM_xmlhttpRequest({
       method: 'GET', url, responseType: 'arraybuffer', timeout: 30000,
@@ -1131,6 +1550,8 @@
   if (hashId) { try { sessionStorage.setItem('mlfWorker', hashId); } catch (e) { /* ignore */ } }
   const myLead = () => { let id = null; try { id = sessionStorage.getItem('mlfWorker'); } catch (e) { /* ignore */ } return id && id === GM_getValue('mlf_active') ? id : null; };
   const stKey = id => 'mlf_state_' + id;
+  // a Create New Lead page that is NOT a lead being entered by this script: put the + LEAD button next to its CONF button
+  { let w = null; try { w = sessionStorage.getItem('mlfWorker'); } catch (e) { /* ignore */ } if (/^\/lead\/new/i.test(location.pathname) && !hashId && !w) mountLeadForm(true); }
   const getL = id => (GM_getValue('mlf_queue', {}) || {})[id];
   const saveL = L => { const q = GM_getValue('mlf_queue', {}); q[L.id] = L; GM_setValue('mlf_queue', q); };
   function progress(L, msg, extra) {
@@ -1524,8 +1945,8 @@
         await sleep(2500);
         let house = null, okAny = false;
         try { house = await getHousePhoto(L); if (house.none) problem(L, 'House picture skipped - ' + house.why); } catch (e) { problem(L, 'House picture: ' + e.message); }
-        if (L.imageUrl) { try { const ls = await fetchBlob(L.imageUrl, 2); await uploadPhotos([new File([ls], L.last + '_leadsheet.jpg', { type: 'image/jpeg' })]); okAny = true; } catch (e) { problem(L, 'Lead sheet picture: ' + e.message + ' - add it by hand'); } }
-        try { const ov = await getOverviewPhoto(L); await uploadPhotos([new File([ov], L.last + '_overview.jpg', { type: 'image/jpeg' })]); okAny = true; } catch (e) { problem(L, 'Overview picture: ' + e.message); }
+        if (L.lsData || L.imageUrl) { try { const ls = L.lsData ? dataUrlToBlob(L.lsData) : await fetchBlob(L.imageUrl, 2); await uploadPhotos([new File([ls], L.last + '_leadsheet.jpg', { type: 'image/jpeg' })]); okAny = true; } catch (e) { problem(L, 'Lead sheet picture: ' + e.message + ' - add it by hand'); } }
+        try { const ov = L.ovData ? dataUrlToBlob(L.ovData) : await getOverviewPhoto(L); await uploadPhotos([new File([ov], L.last + '_overview.jpg', { type: 'image/jpeg' })]); okAny = true; } catch (e) { problem(L, 'Overview picture: ' + e.message); }
         if (house && house.blob) { try { await sleep(1500); await uploadPhotos([new File([house.blob], L.last + '_house.jpg', { type: 'image/jpeg' })]); okAny = true; } catch (e) { problem(L, 'House picture: ' + e.message); } }
         saveL(L);
         return okAny ? go(L, 'location', '') : go(L, 'comments', '/communications');
